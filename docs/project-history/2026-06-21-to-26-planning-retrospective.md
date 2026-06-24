@@ -67,3 +67,23 @@ Tool 응답은 `status(PASS/WARN/FAIL)`, `score`, `confidence(LOW/MEDIUM/HIGH)`,
 ### 리스크와 다음 결정
 
 책임을 분리해도 API와 데이터 이름이 다르면 병렬 구현에서 다시 결합 비용이 발생한다. 다음 날에는 public ID, 상태 전이, 저장 트랜잭션, 로그 보관 정책을 API·DB 계약으로 동결하기로 했다.
+
+## 06월 24일 — API·DB 계약과 추적성 고정
+
+### 목표
+
+5명이 동시에 프론트엔드와 백엔드를 구현해도 요청·응답과 저장 구조가 어긋나지 않도록 사람용 계약과 기계 검증 기준을 먼저 세웠다. 화면 구현보다 API path, 식별자, 상태값, 소유 테이블을 먼저 동결하는 방식으로 협업 순서를 바꿨다.
+
+### 핵심 결정
+
+외부 API의 모든 `id`와 `*Id`는 내부 BIGINT PK가 아닌 `public_id` 문자열로 통일했다. Agent 실행은 `QUEUED → RUNNING → RAG_SEARCHED → TOOLS_CALLED → SUMMARY_READY → SUCCEEDED`를 정상 흐름으로 두고, 복구 가능한 실패는 `FALLBACK_READY` 이력과 경고를 남기도록 했다. 추천 계산은 DB 트랜잭션 밖에서 수행하되, 최종 Build·item·Agent session·RAG evidence·Tool invocation 저장은 하나의 트랜잭션으로 묶어 응답에 미완성 추적 데이터가 노출되지 않게 했다.
+
+PC Agent 로그는 한 줄에 하나의 관측치를 갖는 JSON Lines로 정했다. AS 요청 시 최근 30분만 명시적 동의 후 업로드하고, `delete_after`를 기준으로 30일 뒤 삭제하는 보관 정책을 데이터 계약에 포함했다.
+
+### 업무 산출물과 완료 기준
+
+사람이 합의할 기준은 `API_CONTRACT.md`, `DB_SCHEMA.md`, `ROUTE_OWNERSHIP.md`로 분리하고, `openapi.yaml`을 프론트·백엔드 요청 구조의 기계 검증 기준으로 뒀다. API 변경 PR은 OpenAPI를, DB 상태·컬럼 변경 PR은 DB 계약을 같은 변경에서 수정해야 완료된 것으로 본다.
+
+### 리스크와 다음 결정
+
+계약이 명확해도 공유 파일과 교차 도메인 쓰기 권한이 모호하면 충돌이 반복된다. 다음 날에는 5명의 담당 영역과 리뷰가 필요한 공유 지점을 route, package, table 단위로 고정하기로 했다.
