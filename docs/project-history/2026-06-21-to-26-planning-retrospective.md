@@ -115,3 +115,64 @@ PR 설명에는 변경한 route, API, DB table, owner를 적고, 담당별 smoke
 ### 리스크와 다음 결정
 
 소유권 표만으로는 개발 환경 차이와 통합 시점을 해결할 수 없다. 마지막 날에는 한 명이 새 PC에서 같은 환경을 재현하고, PR 단계에서 계약·빌드·런타임을 자동 검증하는 실행 기반을 정리하기로 했다.
+
+## 06월 26일 — 스캐폴드·검증 기준·팀 인계 준비
+
+### 목표
+
+기획을 발표 자료에 머물게 하지 않고 다음 날부터 바로 구현할 수 있는 저장소 구조로 번역했다. 공통 환경을 먼저 고정하고, 각 담당자가 자신의 feature/domain에서 독립적으로 첫 PR을 낼 수 있는 시작점을 정의했다.
+
+### 핵심 결정
+
+모노레포는 React/Vite 웹, Spring Boot API, Python PC Agent, Docker 인프라로 구성하고 PostgreSQL+pgvector, Redis, RabbitMQ, Mailpit을 Compose 한 번으로 실행하도록 계획했다. API는 도메인 controller 골격과 seed 응답에서 시작하되, 계약을 유지하며 DTO/service/repository와 실제 DB 연결로 단계적으로 교체하도록 했다.
+
+CI는 웹 build와 route smoke test, API `bootJar`, OpenAPI 검증, Docker Compose 구성 검사, DB 연결을 포함한 `/api/health` runtime smoke를 PR의 공통 게이트로 삼았다. 1주차에는 계약과 담당별 happy path를 고정하고, 3주차에는 자연어 입력부터 추천·부품 변경·가격 알림·로그 업로드·AS 티켓·관리자 근거 확인까지 전체 E2E를 연결하는 목표를 세웠다.
+
+### 업무 산출물과 완료 기준
+
+- 새 팀원이 README 순서대로 문서를 읽고 `docker compose up --build`로 같은 환경을 실행할 수 있다.
+- 기능 담당자는 `ROUTE_OWNERSHIP.md`에서 자신의 route, API, DB table, 리뷰어를 찾을 수 있다.
+- 요청/응답 변경은 OpenAPI 검증으로, 상태·보관 정책 변경은 DB 계약 검토로 확인할 수 있다.
+- PC Agent 샘플 생성과 최근 30분 export가 AS 업로드 시나리오의 고정 fixture로 동작한다.
+
+### 남은 리스크와 인계
+
+실제 LLM/RAG 품질, 정교한 Tool 규칙, 센서 수집, 300/1,000명 부하는 스캐폴드 단계의 완료 항목이 아니다. 첫 구현에서는 seed 기반 happy path를 깨지 않으면서 각 도메인의 실제 연결을 교체하고, 계약에 없는 API·상태·컬럼이 필요하면 구현 전에 팀 합의를 거치도록 인계했다. 이 준비는 6월 27일 최초 스캐폴드 커밋 `4f0a1ffa`와 후속 협업 기준 문서로 구체화됐다.
+
+## 6일간의 변화 요약
+
+| 날짜 | 기획 질문 | 확정한 결과 |
+| --- | --- | --- |
+| 6/21 | 어떤 문제를 풀 것인가 | 근거와 Tool 검증이 있는 PC 견적 컨설팅 |
+| 6/22 | 사용자는 어디까지 경험하는가 | 추천부터 가격 알림·AS·관리자 추적까지 E2E 연결 |
+| 6/23 | AI를 어디까지 신뢰할 것인가 | LLM 설명과 결정론적 Tool 판정의 책임 분리 |
+| 6/24 | 팀이 무엇을 계약으로 공유하는가 | API·DB·상태·식별자·보관 정책 동결 |
+| 6/25 | 5명이 어떻게 충돌 없이 만드는가 | 도메인 owner와 공유 지점 리뷰 게이트 |
+| 6/26 | 다음 날 무엇부터 구현하는가 | 재현 가능한 스캐폴드, CI, 첫 PR 완료 기준 |
+
+결과적으로 다짜조는 “AI가 PC를 추천하는 아이디어”에서 “추천 근거와 실행 이력을 저장하고, 5명이 계약을 기준으로 병렬 구현할 수 있는 검증형 플랫폼 계획”으로 발전했다.
+
+## 근거 자료
+
+아래 자료의 현재 내용과 초기 도입 커밋을 함께 대조했다. 따라서 이후 구현으로 확장된 최신 상태와 당시 스캐폴드 의도를 구분해 읽어야 한다.
+
+| 근거 | 확인한 내용 | 초기 이력 |
+| --- | --- | --- |
+| [README](../../README.md) | 목표, 기술 스택, 실행·검증·협업 기준 | `4f0a1ffa` |
+| [아키텍처](../architecture.md) | 런타임 흐름과 도메인 구조 | `4f0a1ffa` |
+| [Sprint 1 시작 체크리스트](../sprint-1-start-checklist.md) | 담당별 첫 구현과 완료 기준 | `c52fa24e` |
+| [스캐폴드 결정사항](../scaffold-decisions.md) | 범위, Tool 경로, health, 후속 과제 | `a7df4a06` |
+| [API 계약](../API_CONTRACT.md) | public ID, 인증, 오류, Agent·Tool·RAG 응답 | `40892e70` |
+| [DB 스키마](../DB_SCHEMA.md) | 상태 전이, 추적 테이블, JSONB, 로그 보관 | `40892e70` |
+| [Route 소유권](../ROUTE_OWNERSHIP.md) | 5인 owner, 공유 지점, PR·테스트 규칙 | `40892e70` |
+| [OpenAPI](../openapi.yaml) | 요청·응답의 기계 검증 기준 | `4f0a1ffa` |
+
+### 재검증 명령
+
+```powershell
+git log origin/main --since="2026-06-21" --until="2026-06-26 23:59:59"
+git show 4f0a1ffa:README.md
+git show c52fa24e:docs/sprint-1-start-checklist.md
+git show a7df4a06:docs/scaffold-decisions.md
+git show 40892e70:docs/API_CONTRACT.md
+```
