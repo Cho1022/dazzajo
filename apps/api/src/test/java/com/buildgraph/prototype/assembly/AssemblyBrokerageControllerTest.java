@@ -95,6 +95,30 @@ class AssemblyBrokerageControllerTest {
     }
 
     @Test
+    void ownerAndAdminOfferResponsesExposeProposalFieldsWithoutReplacingAdminNote() throws Exception {
+        Map<String, Object> offer = Map.of(
+                "id", "offer-1",
+                "warrantyDays", 30,
+                "message", "정품 부품 검수 후 조립합니다.",
+                "adminNote", "관리자 전용 메모"
+        );
+        Map<String, Object> response = Map.of("id", "assembly-1", "offers", List.of(offer));
+        when(service.detailForUser(USER_TOKEN, "assembly-1")).thenReturn(response);
+        when(service.adminRequestDetail(ADMIN_TOKEN, "assembly-1")).thenReturn(response);
+
+        mockMvc.perform(get("/api/assembly-requests/assembly-1").header("Authorization", USER_TOKEN))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.offers[0].warrantyDays").value(30))
+                .andExpect(jsonPath("$.offers[0].message").value("정품 부품 검수 후 조립합니다."))
+                .andExpect(jsonPath("$.offers[0].adminNote").value("관리자 전용 메모"));
+        mockMvc.perform(get("/api/admin/assembly-requests/assembly-1").header("Authorization", ADMIN_TOKEN))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.offers[0].warrantyDays").value(30))
+                .andExpect(jsonPath("$.offers[0].message").value("정품 부품 검수 후 조립합니다."))
+                .andExpect(jsonPath("$.offers[0].adminNote").value("관리자 전용 메모"));
+    }
+
+    @Test
     void adminTechnicianCrudRoutesAreWired() throws Exception {
         when(service.createTechnician(eq(ADMIN_TOKEN), anyMap())).thenReturn(Map.of("id", "tech-1", "displayName", "테스트 기사"));
         when(service.deleteTechnician(ADMIN_TOKEN, "tech-1")).thenReturn(Map.of("id", "tech-1", "deleted", true));

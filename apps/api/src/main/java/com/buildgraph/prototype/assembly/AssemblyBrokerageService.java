@@ -513,7 +513,7 @@ public class AssemblyBrokerageService {
                     final_price = ?, lead_time_days = ?, stock_status = ?, admin_note = ?, updated_at = now()
                 WHERE id = ?
                 """, partsPrice, assemblyFee, deliveryFee, partsPrice + assemblyFee + deliveryFee, leadTime, stockStatus, adminNote, longValue(offer, "internal_id"));
-        addOfferActivity(longValue(offer, "internal_id"), admin.internalId(), "ADMIN_UPDATED", offerPublicId);
+        addOfferActivity(longValue(offer, "internal_id"), admin.internalId(), "ADMIN_UPDATED", offerPublicId, null);
         audit(admin, "ASSEMBLY_OFFER_UPDATED", "assembly_offers", offerPublicId, Map.of("requestId", requestPublicId));
         return detailByInternalId(requestId);
     }
@@ -526,7 +526,7 @@ public class AssemblyBrokerageService {
         if (!"AVAILABLE".equals(DbValueMapper.string(offer, "status"))) throw conflict("선택 또는 철회된 제안은 철회할 수 없습니다.");
         String reason = requiredLimitedText(body.get("reason"), 1000, "철회 사유가 필요합니다.");
         jdbcTemplate.update("UPDATE assembly_offers SET status = 'WITHDRAWN', admin_note = ?, withdrawn_at = now(), updated_at = now() WHERE id = ?", reason, longValue(offer, "internal_id"));
-        addOfferActivity(longValue(offer, "internal_id"), admin.internalId(), "ADMIN_WITHDRAWN", offerPublicId);
+        addOfferActivity(longValue(offer, "internal_id"), admin.internalId(), "ADMIN_WITHDRAWN", offerPublicId, reason);
         Integer available = jdbcTemplate.queryForObject("SELECT count(*) FROM assembly_offers WHERE assembly_request_id = ? AND status = 'AVAILABLE'", Integer.class, requestId);
         if (available != null && available == 0) {
             jdbcTemplate.update("UPDATE assembly_requests SET status = 'REQUESTED', updated_at = now() WHERE id = ? AND status = 'OFFERED'", requestId);
@@ -672,7 +672,8 @@ public class AssemblyBrokerageService {
                        t.public_id::text AS technician_public_id, t.profile_image_url AS technician_profile_image_url,
                        ao.status, ao.technician_snapshot,
                        ao.confirmed_parts_price, ao.assembly_fee, ao.delivery_fee, ao.final_price,
-                       ao.lead_time_days, ao.stock_status, ao.admin_note, ao.submitted_at,
+                       ao.lead_time_days, ao.stock_status, ao.warranty_days, ao.proposal_message,
+                       ao.admin_note, ao.submitted_at,
                        t.provider_type, t.verification_status, ao.created_at, ao.updated_at
                 FROM assembly_offers ao JOIN technicians t ON t.id = ao.technician_id
                 WHERE ao.assembly_request_id = ?
@@ -705,6 +706,8 @@ public class AssemblyBrokerageService {
                 "finalPrice", longValue(row, "final_price"),
                 "leadTimeDays", DbValueMapper.integer(row, "lead_time_days"),
                 "stockStatus", DbValueMapper.string(row, "stock_status"),
+                "warrantyDays", warrantyDays(row),
+                "message", DbValueMapper.string(row, "proposal_message"),
                 "adminNote", DbValueMapper.string(row, "admin_note"),
                 "submittedAt", DbValueMapper.timestamp(row, "submitted_at"),
                 "createdAt", DbValueMapper.timestamp(row, "created_at"),
@@ -914,12 +917,25 @@ public class AssemblyBrokerageService {
                 """, requestId, actorId, from, to, note);
     }
 
-    private void addOfferActivity(Long offerId, Long actorId, String action, String offerPublicId) {
-        Map<String, Object> snapshot = jdbcTemplate.queryForList("""
+    private void addOfferActivity(
+            Long offerId,
+            Long actorId,
+            String action,
+            String offerPublicId,
+            String withdrawalReason
+    ) {
+        Map<String, Object> row = jdbcTemplate.queryForList("""
                 SELECT public_id::text AS id, status, confirmed_parts_price, assembly_fee,
-                       delivery_fee, final_price, lead_time_days, stock_status, admin_note, updated_at
+                       delivery_fee, final_price, lead_time_days, stock_status,
+                       warranty_days, proposal_message, admin_note, updated_at
                 FROM assembly_offers WHERE id = ?
                 """, offerId).stream().findFirst().orElse(Map.of("id", offerPublicId));
+        Map<String, Object> snapshot = new LinkedHashMap<>(row);
+        snapshot.put("warrantyDays", warrantyDays(row));
+        snapshot.put("message", DbValueMapper.string(row, "proposal_message"));
+        if (withdrawalReason != null) {
+            snapshot.put("withdrawalReason", withdrawalReason);
+        }
         jdbcTemplate.update("""
                 INSERT INTO assembly_offer_activities (assembly_offer_id, actor_user_id, action, snapshot, created_at)
                 VALUES (?, ?, ?, ?::jsonb, now())
@@ -940,7 +956,7 @@ public class AssemblyBrokerageService {
                     UPDATE assembly_offers SET status = 'WITHDRAWN', admin_note = ?,
                         withdrawn_at = now(), updated_at = now() WHERE id = ?
                     """, reason, offerId);
-            addOfferActivity(offerId, null, "ADMIN_WITHDRAWN", DbValueMapper.string(offer, "public_id"));
+            addOfferActivity(offerId, null, "ADMIN_WITHDRAWN", DbValueMapper.string(offer, "public_id"), reason);
         }
         for (Long requestId : requestIds) {
             Integer remaining = jdbcTemplate.queryForObject(
@@ -957,6 +973,11 @@ public class AssemblyBrokerageService {
                 }
             }
         }
+    }
+
+    private static int warrantyDays(Map<String, Object> row) {
+        Integer value = DbValueMapper.integer(row, "warranty_days");
+        return value == null ? 0 : value;
     }
 
     private void validateTechnicianEligibleForRequest(Map<String, Object> technician, Map<String, Object> request) {

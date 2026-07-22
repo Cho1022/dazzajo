@@ -177,15 +177,15 @@ public class TechnicianMarketplaceService {
                 INSERT INTO assembly_offers (
                     assembly_request_id, technician_id, status, technician_snapshot,
                     confirmed_parts_price, assembly_fee, delivery_fee, final_price,
-                    lead_time_days, stock_status, admin_note, submitted_by_user_id,
+                    lead_time_days, stock_status, warranty_days, proposal_message, submitted_by_user_id,
                     submitted_at, created_at, updated_at
-                ) VALUES (?, ?, 'AVAILABLE', ?::jsonb, ?, ?, ?, ?, ?, ?, ?, ?, now(), now(), now())
+                ) VALUES (?, ?, 'AVAILABLE', ?::jsonb, ?, ?, ?, ?, ?, ?, ?, ?, ?, now(), now(), now())
                 RETURNING public_id::text
                 """, String.class, requestId, technicianId, toJson(technicianSnapshot(technician)),
                 input.confirmedPartsPrice(), input.assemblyFee(), input.deliveryFee(), input.finalPrice(),
-                input.leadTimeDays(), input.stockStatus(), input.note(), user.internalId());
+                input.leadTimeDays(), input.stockStatus(), input.warrantyDays(), input.message(), user.internalId());
         Map<String, Object> offer = ownOfferByPublicId(offerId, technicianId, true);
-        addOfferActivity(longValue(offer, "id"), user.internalId(), "SUBMITTED", offer);
+        addOfferActivity(longValue(offer, "id"), user.internalId(), "SUBMITTED", offer, null);
         if ("REQUESTED".equals(DbValueMapper.string(request, "status"))) {
             jdbcTemplate.update("UPDATE assembly_requests SET status = 'OFFERED', updated_at = now() WHERE id = ?", requestId);
             addRequestHistory(requestId, user.internalId(), "REQUESTED", "OFFERED", "외부 기사 제안 도착");
@@ -206,12 +206,13 @@ public class TechnicianMarketplaceService {
         OfferInput input = offerInput(body, offer);
         jdbcTemplate.update("""
                 UPDATE assembly_offers SET confirmed_parts_price = ?, assembly_fee = ?, delivery_fee = ?,
-                    final_price = ?, lead_time_days = ?, stock_status = ?, admin_note = ?, updated_at = now()
+                    final_price = ?, lead_time_days = ?, stock_status = ?, warranty_days = ?,
+                    proposal_message = ?, updated_at = now()
                 WHERE id = ?
                 """, input.confirmedPartsPrice(), input.assemblyFee(), input.deliveryFee(), input.finalPrice(),
-                input.leadTimeDays(), input.stockStatus(), input.note(), longValue(offer, "id"));
+                input.leadTimeDays(), input.stockStatus(), input.warrantyDays(), input.message(), longValue(offer, "id"));
         Map<String, Object> updated = ownOfferByPublicId(offerPublicId, longValue(technician, "id"), true);
-        addOfferActivity(longValue(updated, "id"), user.internalId(), "UPDATED", updated);
+        addOfferActivity(longValue(updated, "id"), user.internalId(), "UPDATED", updated, null);
         return offerMap(updated);
     }
 
@@ -231,7 +232,7 @@ public class TechnicianMarketplaceService {
                 WHERE id = ?
                 """, reason, longValue(offer, "id"));
         Map<String, Object> updated = ownOfferByPublicId(offerPublicId, longValue(technician, "id"), true);
-        addOfferActivity(longValue(updated, "id"), user.internalId(), "WITHDRAWN", updated);
+        addOfferActivity(longValue(updated, "id"), user.internalId(), "WITHDRAWN", updated, reason);
         Integer remaining = jdbcTemplate.queryForObject(
                 "SELECT count(*) FROM assembly_offers WHERE assembly_request_id = ? AND status = 'AVAILABLE'",
                 Integer.class, longValue(request, "id"));
@@ -407,7 +408,9 @@ public class TechnicianMarketplaceService {
                 "finalPrice", longValue(row, "final_price"),
                 "leadTimeDays", DbValueMapper.integer(row, "lead_time_days"),
                 "stockStatus", DbValueMapper.string(row, "stock_status"),
-                "note", DbValueMapper.string(row, "admin_note"),
+                "warrantyDays", warrantyDays(row),
+                "message", DbValueMapper.string(row, "proposal_message"),
+                "note", DbValueMapper.string(row, "proposal_message"),
                 "submittedAt", DbValueMapper.timestamp(row, "submitted_at"),
                 "updatedAt", DbValueMapper.timestamp(row, "updated_at")
         );
@@ -473,8 +476,16 @@ public class TechnicianMarketplaceService {
         String stockStatus = body.containsKey("stockStatus")
                 ? required(body.get("stockStatus"), 255, "재고 확인 문구가 필요합니다.")
                 : required(existing == null ? null : existing.get("stock_status"), 255, "재고 확인 문구가 필요합니다.");
-        String note = body.containsKey("note") ? optional(body.get("note"), 1000) : existing == null ? null : DbValueMapper.string(existing, "admin_note");
-        return new OfferInput(partsPrice, assemblyFee, deliveryFee, partsPrice + assemblyFee + deliveryFee, leadTime, stockStatus, note);
+        int warrantyDays = body.containsKey("warrantyDays")
+                ? warrantyDays(body.get("warrantyDays"))
+                : existing == null ? 0 : warrantyDays(existing);
+        String message = body.containsKey("message")
+                ? optional(body.get("message"), 500)
+                : body.containsKey("note")
+                        ? optional(body.get("note"), 500)
+                        : existing == null ? null : DbValueMapper.string(existing, "proposal_message");
+        return new OfferInput(partsPrice, assemblyFee, deliveryFee, partsPrice + assemblyFee + deliveryFee,
+                leadTime, stockStatus, warrantyDays, message);
     }
 
     private Map<String, Object> requireApprovedExternalTechnician(Long userId) {
@@ -549,11 +560,21 @@ public class TechnicianMarketplaceService {
                 .stream().findFirst().orElse(null);
     }
 
-    private void addOfferActivity(Long offerId, Long actorId, String action, Map<String, Object> snapshot) {
+    private void addOfferActivity(
+            Long offerId,
+            Long actorId,
+            String action,
+            Map<String, Object> snapshot,
+            String withdrawalReason
+    ) {
+        Map<String, Object> activitySnapshot = new LinkedHashMap<>(offerMap(snapshot));
+        if (withdrawalReason != null) {
+            activitySnapshot.put("withdrawalReason", withdrawalReason);
+        }
         jdbcTemplate.update("""
                 INSERT INTO assembly_offer_activities (assembly_offer_id, actor_user_id, action, snapshot, created_at)
                 VALUES (?, ?, ?, ?::jsonb, now())
-                """, offerId, actorId, action, toJson(offerMap(snapshot)));
+                """, offerId, actorId, action, toJson(activitySnapshot));
     }
 
     private void addRequestHistory(Long requestId, Long actorId, String from, String to, String note) {
@@ -659,6 +680,23 @@ public class TechnicianMarketplaceService {
         }
     }
 
+    private static int warrantyDays(Object value) {
+        if (value == null) throw validation("무상 보증 기간이 필요합니다.");
+        if (!(value instanceof Byte || value instanceof Short || value instanceof Integer || value instanceof Long)) {
+            throw validation("무상 보증 기간 형식이 올바르지 않습니다.");
+        }
+        long result = ((Number) value).longValue();
+        if (result < 0 || result > 365) {
+            throw validation("무상 보증 기간은 0~365일 범위여야 합니다.");
+        }
+        return (int) result;
+    }
+
+    private static int warrantyDays(Map<String, Object> row) {
+        Integer value = DbValueMapper.integer(row, "warranty_days");
+        return value == null ? 0 : value;
+    }
+
     private static int page(Integer value) {
         if (value == null) return 0;
         if (value < 0) throw validation("page는 0 이상이어야 합니다.");
@@ -725,6 +763,7 @@ public class TechnicianMarketplaceService {
             long finalPrice,
             int leadTimeDays,
             String stockStatus,
-            String note
+            int warrantyDays,
+            String message
     ) {}
 }

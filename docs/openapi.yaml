@@ -1887,7 +1887,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/TechnicianOfferRequest"
+              $ref: "#/components/schemas/TechnicianOfferCreateRequest"
       responses:
         "200":
           description: 본인 AVAILABLE 제안을 포함한 요청 상세
@@ -1911,7 +1911,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/TechnicianOfferRequest"
+              $ref: "#/components/schemas/TechnicianOfferUpdateRequest"
       responses:
         "200":
           description: 수정된 본인 제안
@@ -10368,7 +10368,7 @@ components:
         externalOffer: { type: object, nullable: true, additionalProperties: true }
     AssemblyOfferDto:
       type: object
-      required: [id, technicianId, technicianName, status, confirmedPartsPrice, assemblyFee, deliveryFee, finalPrice, leadTimeDays, stockStatus]
+      required: [id, technicianId, technicianName, status, confirmedPartsPrice, assemblyFee, deliveryFee, finalPrice, leadTimeDays, stockStatus, warrantyDays]
       properties:
         id: { type: string, format: uuid }
         technicianId: { type: string, format: uuid }
@@ -10392,6 +10392,8 @@ components:
         finalPrice: { type: integer, format: int64 }
         leadTimeDays: { type: integer }
         stockStatus: { type: string }
+        warrantyDays: { type: integer, minimum: 0, maximum: 365 }
+        message: { type: string, maxLength: 500, nullable: true }
         adminNote: { type: string, nullable: true }
         submittedAt: { type: string, format: date-time, nullable: true }
     AssemblyPaymentDto:
@@ -10518,19 +10520,32 @@ components:
       required: [reason]
       properties:
         reason: { type: string, minLength: 1, maxLength: 1000 }
-    TechnicianOfferRequest:
+    TechnicianOfferCreateRequest:
       type: object
-      required: [confirmedPartsPrice, assemblyFee, deliveryFee, leadTimeDays, stockStatus]
+      required: [stockStatus]
       properties:
         confirmedPartsPrice: { type: integer, format: int64, minimum: 0 }
         assemblyFee: { type: integer, format: int64, minimum: 0 }
         deliveryFee: { type: integer, format: int64, minimum: 0 }
         leadTimeDays: { type: integer, minimum: 1 }
         stockStatus: { type: string, minLength: 1, maxLength: 255 }
-        note: { type: string, maxLength: 1000, nullable: true }
+        warrantyDays: { type: integer, minimum: 0, maximum: 365 }
+        message: { type: string, maxLength: 500, nullable: true }
+        note: { type: string, maxLength: 500, nullable: true, deprecated: true }
+    TechnicianOfferUpdateRequest:
+      type: object
+      properties:
+        confirmedPartsPrice: { type: integer, format: int64, minimum: 0 }
+        assemblyFee: { type: integer, format: int64, minimum: 0 }
+        deliveryFee: { type: integer, format: int64, minimum: 0 }
+        leadTimeDays: { type: integer, minimum: 1 }
+        stockStatus: { type: string, minLength: 1, maxLength: 255 }
+        warrantyDays: { type: integer, minimum: 0, maximum: 365 }
+        message: { type: string, maxLength: 500, nullable: true }
+        note: { type: string, maxLength: 500, nullable: true, deprecated: true }
     TechnicianOwnOfferDto:
       type: object
-      required: [id, status, confirmedPartsPrice, assemblyFee, deliveryFee, finalPrice, leadTimeDays, stockStatus]
+      required: [id, status, confirmedPartsPrice, assemblyFee, deliveryFee, finalPrice, leadTimeDays, stockStatus, warrantyDays]
       properties:
         id: { type: string, format: uuid }
         status: { type: string, enum: [AVAILABLE, SELECTED, WITHDRAWN, EXPIRED] }
@@ -10540,7 +10555,9 @@ components:
         finalPrice: { type: integer, format: int64 }
         leadTimeDays: { type: integer }
         stockStatus: { type: string }
-        note: { type: string, nullable: true }
+        warrantyDays: { type: integer, minimum: 0, maximum: 365 }
+        message: { type: string, maxLength: 500, nullable: true }
+        note: { type: string, maxLength: 500, nullable: true, deprecated: true }
         submittedAt: { type: string, format: date-time, nullable: true }
         updatedAt: { type: string, format: date-time, nullable: true }
     TechnicianRequestSummaryDto:
