@@ -958,15 +958,29 @@ public class AssemblyBrokerageService {
     }
 
     private void expireExternalOffers(Long technicianId, String reason) {
+        List<Long> requestIds = jdbcTemplate.queryForList("""
+                SELECT DISTINCT assembly_request_id
+                FROM assembly_offers
+                WHERE technician_id = ? AND status = 'AVAILABLE'
+                ORDER BY assembly_request_id
+                """, technicianId).stream()
+                .map(row -> longValue(row, "assembly_request_id"))
+                .sorted()
+                .toList();
+        for (Long requestId : requestIds) {
+            jdbcTemplate.queryForObject(
+                    "SELECT id FROM assembly_requests WHERE id = ? FOR UPDATE",
+                    Long.class,
+                    requestId);
+        }
         List<Map<String, Object>> offers = jdbcTemplate.queryForList("""
                 SELECT id, public_id::text AS public_id, assembly_request_id FROM assembly_offers
                 WHERE technician_id = ? AND status = 'AVAILABLE'
+                ORDER BY assembly_request_id, id
                 FOR UPDATE
                 """, technicianId);
-        Set<Long> requestIds = new java.util.LinkedHashSet<>();
         for (Map<String, Object> offer : offers) {
             Long offerId = longValue(offer, "id");
-            requestIds.add(longValue(offer, "assembly_request_id"));
             jdbcTemplate.update("""
                     UPDATE assembly_offers SET status = 'WITHDRAWN', admin_note = ?,
                         withdrawn_at = now(), updated_at = now() WHERE id = ?
@@ -979,7 +993,7 @@ public class AssemblyBrokerageService {
                     Integer.class, requestId);
             if (remaining != null && remaining == 0) {
                 String previousStatus = jdbcTemplate.queryForObject(
-                        "SELECT status FROM assembly_requests WHERE id = ? FOR UPDATE", String.class, requestId);
+                        "SELECT status FROM assembly_requests WHERE id = ?", String.class, requestId);
                 if ("OFFERED".equals(previousStatus)) {
                     jdbcTemplate.update(
                             "UPDATE assembly_requests SET status = 'REQUESTED', updated_at = now() WHERE id = ?",

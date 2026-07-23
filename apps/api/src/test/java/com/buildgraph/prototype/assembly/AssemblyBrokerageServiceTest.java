@@ -4,7 +4,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -19,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -296,6 +300,53 @@ class AssemblyBrokerageServiceTest {
         );
 
         assertThat(capture.calls()).isEmpty();
+    }
+
+    @Test
+    void expiringExternalOffersLocksSortedRequestsBeforeOffers() {
+        when(jdbcTemplate.queryForList(
+                argThat((String sql) -> sql != null && sql.contains("SELECT DISTINCT assembly_request_id")),
+                any(Object[].class)
+        )).thenReturn(List.of(
+                Map.of("assembly_request_id", 11L),
+                Map.of("assembly_request_id", 10L)
+        ));
+        java.util.ArrayList<Long> lockedRequestIds = new java.util.ArrayList<>();
+        when(jdbcTemplate.queryForObject(
+                contains("SELECT id FROM assembly_requests WHERE id = ? FOR UPDATE"),
+                eq(Long.class),
+                any(Object[].class)
+        )).thenAnswer(invocation -> {
+            Number requestId = invocation.getArgument(2);
+            lockedRequestIds.add(requestId.longValue());
+            return requestId.longValue();
+        });
+        when(jdbcTemplate.queryForList(
+                argThat((String sql) -> sql != null
+                        && sql.contains("WHERE technician_id = ? AND status = 'AVAILABLE'")
+                        && sql.contains("FOR UPDATE")),
+                any(Object[].class)
+        )).thenReturn(List.of());
+
+        ReflectionTestUtils.invokeMethod(service, "expireExternalOffers", 7L, "기사 운영 상태 변경");
+
+        assertThat(lockedRequestIds).containsExactly(10L, 11L);
+        InOrder order = inOrder(jdbcTemplate);
+        order.verify(jdbcTemplate).queryForList(
+                argThat((String sql) -> sql != null && sql.contains("SELECT DISTINCT assembly_request_id")),
+                any(Object[].class)
+        );
+        order.verify(jdbcTemplate, org.mockito.Mockito.times(2)).queryForObject(
+                contains("SELECT id FROM assembly_requests WHERE id = ? FOR UPDATE"),
+                eq(Long.class),
+                any(Object[].class)
+        );
+        order.verify(jdbcTemplate).queryForList(
+                argThat((String sql) -> sql != null
+                        && sql.contains("WHERE technician_id = ? AND status = 'AVAILABLE'")
+                        && sql.contains("FOR UPDATE")),
+                any(Object[].class)
+        );
     }
 
     private static void assertOffer(Map<String, Object> response) {

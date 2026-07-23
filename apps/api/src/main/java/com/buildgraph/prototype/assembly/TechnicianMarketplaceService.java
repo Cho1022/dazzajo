@@ -197,12 +197,14 @@ public class TechnicianMarketplaceService {
     public Map<String, Object> updateOffer(String authorization, String offerPublicId, Map<String, Object> body) {
         CurrentUserService.CurrentUser user = requireRegularUser(authorization);
         Map<String, Object> technician = requireBidEligibleTechnician(user.internalId());
-        Map<String, Object> offer = ownOfferByPublicId(offerPublicId, longValue(technician, "id"), true);
-        if (!"AVAILABLE".equals(DbValueMapper.string(offer, "status"))) throw conflict("수정할 수 없는 제안입니다.");
-        Map<String, Object> request = requestRowForUpdate(longValue(offer, "assembly_request_id"));
+        Long technicianId = longValue(technician, "id");
+        Long requestId = ownOfferRequestId(offerPublicId, technicianId);
+        Map<String, Object> request = requestRowForUpdate(requestId);
+        Map<String, Object> offer = ownOfferForUpdate(offerPublicId, technicianId, requestId);
         if (!Set.of("REQUESTED", "OFFERED").contains(DbValueMapper.string(request, "status"))) {
             throw conflict("마감된 요청의 제안은 수정할 수 없습니다.");
         }
+        if (!"AVAILABLE".equals(DbValueMapper.string(offer, "status"))) throw conflict("수정할 수 없는 제안입니다.");
         OfferInput input = offerInput(body, offer, request);
         jdbcTemplate.update("""
                 UPDATE assembly_offers SET confirmed_parts_price = ?, assembly_fee = ?, delivery_fee = ?,
@@ -220,12 +222,14 @@ public class TechnicianMarketplaceService {
     public Map<String, Object> withdrawOffer(String authorization, String offerPublicId, Map<String, Object> body) {
         CurrentUserService.CurrentUser user = requireRegularUser(authorization);
         Map<String, Object> technician = requireBidEligibleTechnician(user.internalId());
-        Map<String, Object> offer = ownOfferByPublicId(offerPublicId, longValue(technician, "id"), true);
-        if (!"AVAILABLE".equals(DbValueMapper.string(offer, "status"))) throw conflict("철회할 수 없는 제안입니다.");
-        Map<String, Object> request = requestRowForUpdate(longValue(offer, "assembly_request_id"));
+        Long technicianId = longValue(technician, "id");
+        Long requestId = ownOfferRequestId(offerPublicId, technicianId);
+        Map<String, Object> request = requestRowForUpdate(requestId);
+        Map<String, Object> offer = ownOfferForUpdate(offerPublicId, technicianId, requestId);
         if (!Set.of("REQUESTED", "OFFERED").contains(DbValueMapper.string(request, "status"))) {
             throw conflict("마감된 요청의 제안은 철회할 수 없습니다.");
         }
+        if (!"AVAILABLE".equals(DbValueMapper.string(offer, "status"))) throw conflict("철회할 수 없는 제안입니다.");
         String reason = required(body.get("reason"), 1000, "철회 사유가 필요합니다.");
         jdbcTemplate.update("""
                 UPDATE assembly_offers SET status = 'WITHDRAWN', admin_note = ?, withdrawn_at = now(), updated_at = now()
@@ -542,6 +546,27 @@ public class TechnicianMarketplaceService {
                 SELECT *, id AS internal_id, public_id::text AS public_id_text
                 FROM assembly_offers WHERE public_id = ?::uuid AND technician_id = ?
                 """ + suffix, publicId, technicianId).stream().findFirst().orElseThrow(TechnicianMarketplaceService::notFound);
+    }
+
+    private Long ownOfferRequestId(String publicId, Long technicianId) {
+        return jdbcTemplate.queryForList("""
+                SELECT assembly_request_id FROM assembly_offers
+                WHERE public_id = ?::uuid AND technician_id = ?
+                """, publicId, technicianId).stream()
+                .findFirst()
+                .map(row -> longValue(row, "assembly_request_id"))
+                .orElseThrow(TechnicianMarketplaceService::notFound);
+    }
+
+    private Map<String, Object> ownOfferForUpdate(String publicId, Long technicianId, Long requestId) {
+        return jdbcTemplate.queryForList("""
+                SELECT *, id AS internal_id, public_id::text AS public_id_text
+                FROM assembly_offers
+                WHERE public_id = ?::uuid AND technician_id = ? AND assembly_request_id = ?
+                FOR UPDATE
+                """, publicId, technicianId, requestId).stream()
+                .findFirst()
+                .orElseThrow(TechnicianMarketplaceService::notFound);
     }
 
     private Map<String, Object> requestRow(Long requestId) {

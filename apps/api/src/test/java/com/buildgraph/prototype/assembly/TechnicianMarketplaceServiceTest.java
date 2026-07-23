@@ -7,6 +7,7 @@ import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -21,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -250,6 +252,34 @@ class TechnicianMarketplaceServiceTest {
     }
 
     @Test
+    void updateOfferLocksRequestBeforeRevalidatingOwnedOffer() {
+        stubOfferWorkflow(offerRow(), offerRow());
+
+        service.updateOffer("Bearer user", "offer-public-id", Map.of("assemblyFee", 80_000L));
+
+        assertRequestThenOfferLockOrder();
+    }
+
+    @Test
+    void updateOfferRejectsOfferSelectedWhileWaitingForRequestLockWithoutWrites() {
+        Map<String, Object> selected = offerRow();
+        selected.put("status", "SELECTED");
+        UpdateCapture capture = stubOfferWorkflow(selected, selected);
+
+        assertThatThrownBy(() -> service.updateOffer(
+                "Bearer user", "offer-public-id", Map.of("assemblyFee", 80_000L)))
+                .isInstanceOf(ApiException.class)
+                .satisfies(error -> {
+                    ApiException apiException = (ApiException) error;
+                    assertThat(apiException.status()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(apiException.code()).isEqualTo("CONFLICT_STATE");
+                });
+
+        assertRequestThenOfferLockOrder();
+        assertThat(capture.calls()).isEmpty();
+    }
+
+    @Test
     void legacyPriceFieldsDoNotAffectCreateOrUpdateCanonicalPrices() {
         Map<String, Object> create = baseCreateBody();
         create.put("confirmedPartsPrice", 9_999_999L);
@@ -304,6 +334,41 @@ class TechnicianMarketplaceServiceTest {
                 .containsEntry("message", "저장된 제안")
                 .containsEntry("note", "저장된 제안")
                 .doesNotContainKey("adminNote");
+    }
+
+    @Test
+    void withdrawOfferLocksRequestBeforeRevalidatingOwnedOffer() {
+        Map<String, Object> withdrawn = offerRow();
+        withdrawn.put("status", "WITHDRAWN");
+        stubOfferWorkflow(offerRow(), withdrawn);
+        when(jdbcTemplate.queryForObject(
+                contains("SELECT count(*) FROM assembly_offers WHERE assembly_request_id"),
+                eq(Integer.class),
+                any(Object[].class)
+        )).thenReturn(1);
+
+        service.withdrawOffer("Bearer user", "offer-public-id", Map.of("reason", "일정 불가"));
+
+        assertRequestThenOfferLockOrder();
+    }
+
+    @Test
+    void withdrawOfferRejectsOfferSelectedWhileWaitingForRequestLockWithoutWrites() {
+        Map<String, Object> selected = offerRow();
+        selected.put("status", "SELECTED");
+        UpdateCapture capture = stubOfferWorkflow(selected, selected);
+
+        assertThatThrownBy(() -> service.withdrawOffer(
+                "Bearer user", "offer-public-id", Map.of("reason", "일정 불가")))
+                .isInstanceOf(ApiException.class)
+                .satisfies(error -> {
+                    ApiException apiException = (ApiException) error;
+                    assertThat(apiException.status()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(apiException.code()).isEqualTo("CONFLICT_STATE");
+                });
+
+        assertRequestThenOfferLockOrder();
+        assertThat(capture.calls()).isEmpty();
     }
 
     @Test
@@ -411,8 +476,19 @@ class TechnicianMarketplaceServiceTest {
                 contains("WHERE ar.id = ?"), any(Object[].class)
         )).thenReturn(List.of(requestRow()));
         when(jdbcTemplate.queryForList(
+                argThat((String sql) -> sql != null
+                        && sql.contains("SELECT assembly_request_id FROM assembly_offers")),
+                any(Object[].class)
+        )).thenReturn(List.of(Map.of("assembly_request_id", before.get("assembly_request_id"))));
+        when(jdbcTemplate.queryForList(
+                argThat((String sql) -> sql != null
+                        && sql.contains("AND assembly_request_id = ?")
+                        && sql.contains("FOR UPDATE")),
+                any(Object[].class)
+        )).thenReturn(List.of(before));
+        when(jdbcTemplate.queryForList(
                 contains("FROM assembly_offers WHERE public_id"), any(Object[].class)
-        )).thenReturn(List.of(before), List.of(after));
+        )).thenReturn(List.of(after));
         when(jdbcTemplate.queryForList(
                 contains("FROM assembly_offers WHERE assembly_request_id"), any(Object[].class)
         )).thenReturn(List.of(after));
@@ -427,6 +503,26 @@ class TechnicianMarketplaceServiceTest {
         ArgumentCaptor<Object[]> updateParams = ArgumentCaptor.forClass(Object[].class);
         when(jdbcTemplate.update(updateSql.capture(), updateParams.capture())).thenReturn(1);
         return new UpdateCapture(updateSql, updateParams);
+    }
+
+    private void assertRequestThenOfferLockOrder() {
+        InOrder order = inOrder(jdbcTemplate);
+        order.verify(jdbcTemplate).queryForList(
+                argThat((String sql) -> sql != null
+                        && sql.contains("SELECT assembly_request_id FROM assembly_offers")
+                        && !sql.contains("FOR UPDATE")),
+                any(Object[].class)
+        );
+        order.verify(jdbcTemplate).queryForList(
+                contains("SELECT * FROM assembly_requests WHERE id = ? FOR UPDATE"),
+                any(Object[].class)
+        );
+        order.verify(jdbcTemplate).queryForList(
+                argThat((String sql) -> sql != null
+                        && sql.contains("AND assembly_request_id = ?")
+                        && sql.contains("FOR UPDATE")),
+                any(Object[].class)
+        );
     }
 
     private static Map<String, Object> technicianRow() {
