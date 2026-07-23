@@ -65,13 +65,13 @@ class TechnicianMarketplaceServiceTest {
     }
 
     @Test
-    void createOfferInputDefaultsWarrantyAndKeepsExistingPriceFields() {
+    void createOfferInputDefaultsWarrantyAndCalculatesCanonicalPrice() {
         Object input = offerInput(baseCreateBody(), null);
 
         assertThat(inputValue(input, "confirmedPartsPrice")).isEqualTo(1_000L);
         assertThat(inputValue(input, "assemblyFee")).isEqualTo(70_000L);
-        assertThat(inputValue(input, "deliveryFee")).isEqualTo(3_000L);
-        assertThat(inputValue(input, "finalPrice")).isEqualTo(74_000L);
+        assertThat(inputValue(input, "deliveryFee")).isEqualTo(0L);
+        assertThat(inputValue(input, "finalPrice")).isEqualTo(71_000L);
         assertThat(inputValue(input, "warrantyDays")).isEqualTo(0);
         assertThat(inputValue(input, "message")).isNull();
     }
@@ -191,8 +191,8 @@ class TechnicianMarketplaceServiceTest {
         assertThat(insert.params()[2]).isInstanceOf(String.class);
         assertThat(insert.params()[3]).isEqualTo(1_000L);
         assertThat(insert.params()[4]).isEqualTo(70_000L);
-        assertThat(insert.params()[5]).isEqualTo(3_000L);
-        assertThat(insert.params()[6]).isEqualTo(74_000L);
+        assertThat(insert.params()[5]).isEqualTo(0L);
+        assertThat(insert.params()[6]).isEqualTo(71_000L);
         assertThat(insert.params()[7]).isEqualTo(2);
         assertThat(insert.params()[8]).isEqualTo("재고 확인");
         assertThat(insert.params()[9]).isEqualTo(30);
@@ -233,7 +233,7 @@ class TechnicianMarketplaceServiceTest {
                 .contains("warranty_days = ?")
                 .contains("proposal_message = ?");
         assertThat(update.params()).containsExactly(
-                1_000L, 70_000L, 3_000L, 74_000L, 2, "재고 확인", 90, "안정성 테스트 포함", 20L
+                1_000L, 70_000L, 0L, 71_000L, 2, "재고 확인", 90, "안정성 테스트 포함", 20L
         );
 
         Map<String, Object> explicitNull = new HashMap<>();
@@ -247,6 +247,33 @@ class TechnicianMarketplaceServiceTest {
         SqlCall omitted = runUpdateOffer(Map.of());
         assertThat(omitted.params()[6]).isEqualTo(45);
         assertThat(omitted.params()[7]).isEqualTo("저장된 제안");
+    }
+
+    @Test
+    void legacyPriceFieldsDoNotAffectCreateOrUpdateCanonicalPrices() {
+        Map<String, Object> create = baseCreateBody();
+        create.put("confirmedPartsPrice", 9_999_999L);
+        create.put("deliveryFee", 8_888_888L);
+        create.put("assemblyFee", 50_000L);
+
+        SqlCall insert = runCreateOffer(create);
+        assertThat(insert.params()[3]).isEqualTo(1_000L);
+        assertThat(insert.params()[4]).isEqualTo(50_000L);
+        assertThat(insert.params()[5]).isEqualTo(0L);
+        assertThat(insert.params()[6]).isEqualTo(51_000L);
+
+        Map<String, Object> update = new HashMap<>();
+        update.put("confirmedPartsPrice", 7_777_777L);
+        update.put("deliveryFee", 6_666_666L);
+        update.put("assemblyFee", 80_000L);
+        SqlCall changed = runUpdateOffer(update);
+        assertThat(changed.params()).startsWith(1_000L, 80_000L, 0L, 81_000L);
+
+        SqlCall omittedAssemblyFee = runUpdateOffer(Map.of(
+                "confirmedPartsPrice", 5_555_555L,
+                "deliveryFee", 4_444_444L
+        ));
+        assertThat(omittedAssemblyFee.params()).startsWith(1_000L, 70_000L, 0L, 71_000L);
     }
 
     @Test
@@ -322,7 +349,7 @@ class TechnicianMarketplaceServiceTest {
     }
 
     private Object offerInput(Map<String, Object> body, Map<String, Object> existing) {
-        return ReflectionTestUtils.invokeMethod(service, "offerInput", body, existing);
+        return ReflectionTestUtils.invokeMethod(service, "offerInput", body, existing, requestRow());
     }
 
     private static Object inputValue(Object input, String accessor) {

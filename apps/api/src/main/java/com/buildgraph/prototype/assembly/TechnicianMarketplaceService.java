@@ -172,7 +172,7 @@ public class TechnicianMarketplaceService {
         if (externalCount != null && externalCount >= MAX_EXTERNAL_OFFERS) {
             throw conflict("외부 기사 제안이 마감되었습니다.");
         }
-        OfferInput input = offerInput(body, null);
+        OfferInput input = offerInput(body, null, request);
         String offerId = jdbcTemplate.queryForObject("""
                 INSERT INTO assembly_offers (
                     assembly_request_id, technician_id, status, technician_snapshot,
@@ -203,7 +203,7 @@ public class TechnicianMarketplaceService {
         if (!Set.of("REQUESTED", "OFFERED").contains(DbValueMapper.string(request, "status"))) {
             throw conflict("마감된 요청의 제안은 수정할 수 없습니다.");
         }
-        OfferInput input = offerInput(body, offer);
+        OfferInput input = offerInput(body, offer, request);
         jdbcTemplate.update("""
                 UPDATE assembly_offers SET confirmed_parts_price = ?, assembly_fee = ?, delivery_fee = ?,
                     final_price = ?, lead_time_days = ?, stock_status = ?, warranty_days = ?,
@@ -468,10 +468,13 @@ public class TechnicianMarketplaceService {
                 regions, serviceTypes, specialties, assemblyFee, deliveryFee, leadTime, asAccepted);
     }
 
-    private OfferInput offerInput(Map<String, Object> body, Map<String, Object> existing) {
-        long partsPrice = nonnegative(body.get("confirmedPartsPrice"), existing == null ? 0 : longValue(existing, "confirmed_parts_price"), "부품 확인가");
+    private OfferInput offerInput(Map<String, Object> body, Map<String, Object> existing, Map<String, Object> request) {
         long assemblyFee = nonnegative(body.get("assemblyFee"), existing == null ? 0 : longValue(existing, "assembly_fee"), "조립비");
-        long deliveryFee = nonnegative(body.get("deliveryFee"), existing == null ? 0 : longValue(existing, "delivery_fee"), "배송비");
+        AssemblyOfferPricePolicy.PriceResult price = AssemblyOfferPricePolicy.calculate(
+                DbValueMapper.string(request, "service_type"),
+                longValue(request, "estimated_parts_price"),
+                assemblyFee
+        );
         int leadTime = (int) positive(body.get("leadTimeDays"), existing == null ? 1 : longValue(existing, "lead_time_days"), "예상 소요일");
         String stockStatus = body.containsKey("stockStatus")
                 ? required(body.get("stockStatus"), 255, "재고 확인 문구가 필요합니다.")
@@ -484,7 +487,7 @@ public class TechnicianMarketplaceService {
                 : body.containsKey("note")
                         ? optional(body.get("note"), 500)
                         : existing == null ? null : DbValueMapper.string(existing, "proposal_message");
-        return new OfferInput(partsPrice, assemblyFee, deliveryFee, partsPrice + assemblyFee + deliveryFee,
+        return new OfferInput(price.confirmedPartsPrice(), price.assemblyFee(), price.deliveryFee(), price.finalPrice(),
                 leadTime, stockStatus, warrantyDays, message);
     }
 

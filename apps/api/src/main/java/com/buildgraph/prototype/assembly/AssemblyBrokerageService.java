@@ -197,14 +197,24 @@ public class AssemblyBrokerageService {
         if (!"AVAILABLE".equals(DbValueMapper.string(offer, "status"))) {
             throw conflict("선택할 수 없는 기사 제안입니다.");
         }
-        jdbcTemplate.update("UPDATE assembly_offers SET status = 'EXPIRED', updated_at = now() WHERE assembly_request_id = ? AND status = 'AVAILABLE' AND id <> ?", requestId, offerId);
-        jdbcTemplate.update("UPDATE assembly_offers SET status = 'SELECTED', selected_at = now(), updated_at = now() WHERE id = ?", offerId);
-        jdbcTemplate.update("UPDATE assembly_requests SET status = 'MATCHED', selected_offer_id = ?, matched_at = now(), updated_at = now() WHERE id = ?", offerId, requestId);
+        AssemblyOfferPricePolicy.PriceResult price = AssemblyOfferPricePolicy.calculate(
+                DbValueMapper.string(request, "service_type"),
+                longValue(request, "estimated_parts_price"),
+                longValue(offer, "assembly_fee")
+        );
+        jdbcTemplate.update("""
+                UPDATE assembly_offers
+                SET confirmed_parts_price = ?, assembly_fee = ?, delivery_fee = ?, final_price = ?, updated_at = now()
+                WHERE id = ?
+                """, price.confirmedPartsPrice(), price.assemblyFee(), price.deliveryFee(), price.finalPrice(), offerId);
         jdbcTemplate.update("""
                 INSERT INTO assembly_payments (assembly_request_id, amount, method, status, created_at, updated_at)
                 VALUES (?, ?, 'VIRTUAL', 'PENDING', now(), now())
                 ON CONFLICT (assembly_request_id) DO NOTHING
-                """, requestId, longValue(offer, "final_price"));
+                """, requestId, price.finalPrice());
+        jdbcTemplate.update("UPDATE assembly_offers SET status = 'SELECTED', selected_at = now(), updated_at = now() WHERE id = ?", offerId);
+        jdbcTemplate.update("UPDATE assembly_offers SET status = 'EXPIRED', updated_at = now() WHERE assembly_request_id = ? AND status = 'AVAILABLE' AND id <> ?", requestId, offerId);
+        jdbcTemplate.update("UPDATE assembly_requests SET status = 'MATCHED', selected_offer_id = ?, matched_at = now(), updated_at = now() WHERE id = ?", offerId, requestId);
         addHistory(requestId, user.internalId(), status, "MATCHED", "사용자 기사 제안 선택");
         return detailByInternalId(requestId);
     }
@@ -502,9 +512,13 @@ public class AssemblyBrokerageService {
         Long requestId = requireRequestForUpdate(requestPublicId);
         Map<String, Object> offer = offerRow(requestId, offerPublicId);
         if (!"AVAILABLE".equals(DbValueMapper.string(offer, "status"))) throw conflict("선택 또는 철회된 제안은 수정할 수 없습니다.");
-        long partsPrice = optionalNonnegativeLong(body.get("confirmedPartsPrice"), longValue(offer, "confirmed_parts_price"), "부품 확인가");
+        Map<String, Object> request = requestRow(requestId);
         long assemblyFee = optionalNonnegativeLong(body.get("assemblyFee"), longValue(offer, "assembly_fee"), "조립비");
-        long deliveryFee = optionalNonnegativeLong(body.get("deliveryFee"), longValue(offer, "delivery_fee"), "배송비");
+        AssemblyOfferPricePolicy.PriceResult price = AssemblyOfferPricePolicy.calculate(
+                DbValueMapper.string(request, "service_type"),
+                longValue(request, "estimated_parts_price"),
+                assemblyFee
+        );
         int leadTime = (int) optionalPositiveLong(body.get("leadTimeDays"), longValue(offer, "lead_time_days"), "예상 소요일");
         String stockStatus = body.containsKey("stockStatus") ? requiredLimitedText(body.get("stockStatus"), 255, "재고 확인 문구가 필요합니다.") : DbValueMapper.string(offer, "stock_status");
         String adminNote = body.containsKey("adminNote") ? optionalText(body.get("adminNote"), 1000, "관리자 메모는 1000자 이하여야 합니다.") : DbValueMapper.string(offer, "admin_note");
@@ -512,7 +526,8 @@ public class AssemblyBrokerageService {
                 UPDATE assembly_offers SET confirmed_parts_price = ?, assembly_fee = ?, delivery_fee = ?,
                     final_price = ?, lead_time_days = ?, stock_status = ?, admin_note = ?, updated_at = now()
                 WHERE id = ?
-                """, partsPrice, assemblyFee, deliveryFee, partsPrice + assemblyFee + deliveryFee, leadTime, stockStatus, adminNote, longValue(offer, "internal_id"));
+                """, price.confirmedPartsPrice(), price.assemblyFee(), price.deliveryFee(), price.finalPrice(),
+                leadTime, stockStatus, adminNote, longValue(offer, "internal_id"));
         addOfferActivity(longValue(offer, "internal_id"), admin.internalId(), "ADMIN_UPDATED", offerPublicId, null);
         audit(admin, "ASSEMBLY_OFFER_UPDATED", "assembly_offers", offerPublicId, Map.of("requestId", requestPublicId));
         return detailByInternalId(requestId);
@@ -571,13 +586,12 @@ public class AssemblyBrokerageService {
 
     private void insertOffer(Long requestId, Map<String, Object> request, Map<String, Object> technician, Map<String, Object> overrides, long estimatedPartsPrice) {
         String serviceType = DbValueMapper.string(request, "service_type");
-        String deliveryMethod = DbValueMapper.string(request, "delivery_method");
-        long defaultParts = "FULL_SERVICE".equals(serviceType)
-                ? Math.max(0, estimatedPartsPrice + longValue(technician, "parts_price_adjustment")) : 0;
-        long partsPrice = optionalNonnegativeLong(overrides.get("confirmedPartsPrice"), defaultParts, "부품 확인가");
         long assemblyFee = optionalNonnegativeLong(overrides.get("assemblyFee"), longValue(technician, "assembly_fee"), "조립비");
-        long defaultDelivery = "PICKUP".equals(deliveryMethod) ? 0 : longValue(technician, "delivery_fee");
-        long deliveryFee = optionalNonnegativeLong(overrides.get("deliveryFee"), defaultDelivery, "배송비");
+        AssemblyOfferPricePolicy.PriceResult price = AssemblyOfferPricePolicy.calculate(
+                serviceType,
+                estimatedPartsPrice,
+                assemblyFee
+        );
         int leadTime = (int) optionalPositiveLong(overrides.get("leadTimeDays"), longValue(technician, "lead_time_days"), "예상 소요일");
         String stockStatus = overrides.get("stockStatus") == null
                 ? ("FULL_SERVICE".equals(serviceType) ? "주요 부품 재고 확인" : "보유 부품 검수 후 조립")
@@ -589,8 +603,9 @@ public class AssemblyBrokerageService {
                     confirmed_parts_price, assembly_fee, delivery_fee, final_price,
                     lead_time_days, stock_status, admin_note, created_at, updated_at
                 ) VALUES (?, ?, 'AVAILABLE', ?::jsonb, ?, ?, ?, ?, ?, ?, ?, now(), now())
-                """, requestId, longValue(technician, "id"), toJson(technicianSnapshot(technician)), partsPrice,
-                assemblyFee, deliveryFee, partsPrice + assemblyFee + deliveryFee, leadTime, stockStatus, note);
+                """, requestId, longValue(technician, "id"), toJson(technicianSnapshot(technician)),
+                price.confirmedPartsPrice(), price.assemblyFee(), price.deliveryFee(), price.finalPrice(),
+                leadTime, stockStatus, note);
     }
 
     private Map<String, Object> detailByInternalId(Long requestId) {

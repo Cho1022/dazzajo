@@ -1879,7 +1879,7 @@ paths:
   /api/technician/assembly-requests/{id}/offers:
     post:
       summary: 외부 기사 직접 제안 제출
-      description: 요청 row를 잠근 뒤 외부 AVAILABLE 제안이 3건 미만인지 확인한다. 기사당 요청별 제안은 1건이다.
+      description: 요청 row를 잠근 뒤 외부 AVAILABLE 제안이 3건 미만인지 확인한다. 기사당 요청별 제안은 1건이며, 가격은 요청 snapshot과 assemblyFee로 서버가 계산한다.
       parameters:
         - $ref: "#/components/parameters/PublicId"
       requestBody:
@@ -1904,6 +1904,7 @@ paths:
   /api/technician/offers/{id}:
     patch:
       summary: 본인 AVAILABLE 제안 수정
+      description: 모든 필드는 선택이며, 가격은 수정 후 assemblyFee와 요청 snapshot으로 서버가 다시 계산한다.
       parameters:
         - $ref: "#/components/parameters/PublicId"
       requestBody:
@@ -10386,10 +10387,10 @@ components:
         providerType: { type: string, enum: [INTERNAL, EXTERNAL] }
         verified: { type: boolean }
         status: { type: string, enum: [AVAILABLE, SELECTED, WITHDRAWN, EXPIRED] }
-        confirmedPartsPrice: { type: integer, format: int64 }
+        confirmedPartsPrice: { type: integer, format: int64, description: 서비스 유형과 요청 부품가 snapshot으로 서버가 계산한 금액 }
         assemblyFee: { type: integer, format: int64 }
-        deliveryFee: { type: integer, format: int64 }
-        finalPrice: { type: integer, format: int64 }
+        deliveryFee: { type: integer, format: int64, description: 신규 RFQ 가격 정책에서는 0 }
+        finalPrice: { type: integer, format: int64, description: 서버가 계산한 confirmedPartsPrice + assemblyFee + deliveryFee }
         leadTimeDays: { type: integer }
         stockStatus: { type: string }
         warrantyDays: { type: integer, minimum: 0, maximum: 365 }
@@ -10439,18 +10440,18 @@ components:
       required: [technicianId]
       properties:
         technicianId: { type: string, format: uuid }
-        confirmedPartsPrice: { type: integer, format: int64, minimum: 0 }
+        confirmedPartsPrice: { type: integer, format: int64, minimum: 0, deprecated: true, description: 하위 호환 입력이며 신규 RFQ 가격 계산에서는 무시 }
         assemblyFee: { type: integer, format: int64, minimum: 0 }
-        deliveryFee: { type: integer, format: int64, minimum: 0 }
+        deliveryFee: { type: integer, format: int64, minimum: 0, deprecated: true, description: 하위 호환 입력이며 신규 RFQ 가격 계산에서는 무시 }
         leadTimeDays: { type: integer, minimum: 1 }
         stockStatus: { type: string }
         adminNote: { type: string }
     AssemblyOfferUpdateRequest:
       type: object
       properties:
-        confirmedPartsPrice: { type: integer, format: int64, minimum: 0 }
+        confirmedPartsPrice: { type: integer, format: int64, minimum: 0, deprecated: true, description: 하위 호환 입력이며 신규 RFQ 가격 계산에서는 무시 }
         assemblyFee: { type: integer, format: int64, minimum: 0 }
-        deliveryFee: { type: integer, format: int64, minimum: 0 }
+        deliveryFee: { type: integer, format: int64, minimum: 0, deprecated: true, description: 하위 호환 입력이며 신규 RFQ 가격 계산에서는 무시 }
         leadTimeDays: { type: integer, minimum: 1 }
         stockStatus: { type: string }
         adminNote: { type: string, nullable: true }
@@ -10524,9 +10525,9 @@ components:
       type: object
       required: [stockStatus]
       properties:
-        confirmedPartsPrice: { type: integer, format: int64, minimum: 0 }
+        confirmedPartsPrice: { type: integer, format: int64, minimum: 0, deprecated: true, description: 하위 호환 입력이며 서버 가격 계산에서는 무시 }
         assemblyFee: { type: integer, format: int64, minimum: 0 }
-        deliveryFee: { type: integer, format: int64, minimum: 0 }
+        deliveryFee: { type: integer, format: int64, minimum: 0, deprecated: true, description: 하위 호환 입력이며 서버 가격 계산에서는 무시 }
         leadTimeDays: { type: integer, minimum: 1 }
         stockStatus: { type: string, minLength: 1, maxLength: 255 }
         warrantyDays: { type: integer, minimum: 0, maximum: 365 }
@@ -10535,9 +10536,9 @@ components:
     TechnicianOfferUpdateRequest:
       type: object
       properties:
-        confirmedPartsPrice: { type: integer, format: int64, minimum: 0 }
+        confirmedPartsPrice: { type: integer, format: int64, minimum: 0, deprecated: true, description: 하위 호환 입력이며 서버 가격 계산에서는 무시 }
         assemblyFee: { type: integer, format: int64, minimum: 0 }
-        deliveryFee: { type: integer, format: int64, minimum: 0 }
+        deliveryFee: { type: integer, format: int64, minimum: 0, deprecated: true, description: 하위 호환 입력이며 서버 가격 계산에서는 무시 }
         leadTimeDays: { type: integer, minimum: 1 }
         stockStatus: { type: string, minLength: 1, maxLength: 255 }
         warrantyDays: { type: integer, minimum: 0, maximum: 365 }
@@ -10549,10 +10550,10 @@ components:
       properties:
         id: { type: string, format: uuid }
         status: { type: string, enum: [AVAILABLE, SELECTED, WITHDRAWN, EXPIRED] }
-        confirmedPartsPrice: { type: integer, format: int64 }
+        confirmedPartsPrice: { type: integer, format: int64, description: 서비스 유형과 요청 부품가 snapshot으로 서버가 계산한 금액 }
         assemblyFee: { type: integer, format: int64 }
-        deliveryFee: { type: integer, format: int64 }
-        finalPrice: { type: integer, format: int64 }
+        deliveryFee: { type: integer, format: int64, description: 신규 RFQ 가격 정책에서는 0 }
+        finalPrice: { type: integer, format: int64, description: 서버 계산 최종 금액 }
         leadTimeDays: { type: integer }
         stockStatus: { type: string }
         warrantyDays: { type: integer, minimum: 0, maximum: 365 }
