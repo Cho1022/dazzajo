@@ -68,7 +68,10 @@ test('refreshes checkout offers when a new technician offer arrives', async ({ p
   await page.goto('/checkout/offers/assembly-live-1');
 
   await expect(page.getByRole('heading', { name: '기사 제안 1건' })).toBeVisible();
-  await expect(page.getByText('내부 빠른 기사')).toBeVisible();
+  const platformSection = page.getByTestId('internal-offer-section');
+  await expect(platformSection.getByRole('heading', { name: '플랫폼 즉시 제안', level: 2 })).toBeVisible();
+  await expect(platformSection.getByRole('button', { name: '이 제안 선택' })).toBeEnabled();
+  await expect(page.getByText('내부 빠른 기사')).toHaveCount(0);
 
   includeExternalOffer = true;
 

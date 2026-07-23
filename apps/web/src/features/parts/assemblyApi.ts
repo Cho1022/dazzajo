@@ -55,6 +55,9 @@ export type AssemblyOffer = {
   finalPrice: number;
   leadTimeDays: number;
   stockStatus: string;
+  warrantyDays: number | null;
+  message: string | null;
+  note?: string | null;
   adminNote?: string | null;
   submittedAt?: string | null;
   createdAt?: string | null;
