@@ -286,6 +286,8 @@ export type TechnicianOwnOffer = {
   finalPrice: number;
   leadTimeDays: number;
   stockStatus: string;
+  warrantyDays: number | null;
+  message: string | null;
   note?: string | null;
   submittedAt?: string | null;
   updatedAt?: string | null;
@@ -316,13 +318,20 @@ export type TechnicianRequest = TechnicianRequestSummary & {
 
 export type TechnicianRequestPage = { items: TechnicianRequestSummary[]; page: number; size: number; total: number };
 
-export type TechnicianOfferPayload = {
-  confirmedPartsPrice: number;
+export type CreateTechnicianOfferInput = {
   assemblyFee: number;
-  deliveryFee: number;
   leadTimeDays: number;
   stockStatus: string;
-  note?: string;
+  warrantyDays: number;
+  message: string | null;
+};
+
+export type UpdateTechnicianOfferInput = {
+  assemblyFee?: number;
+  leadTimeDays?: number;
+  stockStatus?: string;
+  warrantyDays?: number;
+  message?: string | null;
 };
 
 export function applyAsTechnician(payload: TechnicianApplicationPayload) {
@@ -345,14 +354,14 @@ export function getTechnicianRequest(id: string) {
   return api<TechnicianRequest>(`/api/technician/assembly-requests/${id}`);
 }
 
-export function createTechnicianOffer(requestId: string, payload: TechnicianOfferPayload) {
+export function createTechnicianOffer(requestId: string, payload: CreateTechnicianOfferInput) {
   return api<TechnicianRequest>(`/api/technician/assembly-requests/${requestId}/offers`, {
     method: 'POST',
     body: JSON.stringify(payload)
   });
 }
 
-export function updateTechnicianOffer(offerId: string, payload: TechnicianOfferPayload) {
+export function updateTechnicianOffer(offerId: string, payload: UpdateTechnicianOfferInput) {
   return api<TechnicianOwnOffer>(`/api/technician/offers/${offerId}`, {
     method: 'PATCH',
     body: JSON.stringify(payload)
