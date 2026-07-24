@@ -328,7 +328,7 @@ public class AssemblyBrokerageService {
     @Transactional
     public Map<String, Object> updateTechnician(String authorization, String publicId, Map<String, Object> body) {
         CurrentUserService.CurrentUser admin = currentUserService.requireAdmin(authorization);
-        Map<String, Object> existing = requireTechnician(publicId, true);
+        Map<String, Object> existing = requireTechnicianForUpdate(publicId, true);
         TechnicianInput input = technicianInput(body, existing);
         if ("EXTERNAL".equals(DbValueMapper.string(existing, "provider_type"))
                 && "ACTIVE".equals(input.status())
@@ -347,7 +347,8 @@ public class AssemblyBrokerageService {
                 toJson(input.serviceRegions()), toJson(input.serviceTypes()), toJson(input.specialties()), input.rating(),
                 input.completedJobs(), input.avgResponseMinutes(), input.assemblyFee(), input.deliveryFee(),
                 input.leadTimeDays(), input.partsPriceAdjustment(), input.sortPriority(), input.standardAsAccepted(), publicId);
-        if ("SUSPENDED".equals(input.status()) || !input.standardAsAccepted()) {
+        if ("EXTERNAL".equals(DbValueMapper.string(existing, "provider_type"))
+                && (!"ACTIVE".equals(input.status()) || !input.standardAsAccepted())) {
             expireExternalOffers(longValue(existing, "id"), "기사 운영 상태 변경");
         }
         audit(admin, "TECHNICIAN_UPDATED", "technicians", publicId, Map.of("status", input.status()));
@@ -357,9 +358,11 @@ public class AssemblyBrokerageService {
     @Transactional
     public Map<String, Object> deleteTechnician(String authorization, String publicId) {
         CurrentUserService.CurrentUser admin = currentUserService.requireAdmin(authorization);
-        requireTechnician(publicId, false);
+        Map<String, Object> technician = requireTechnicianForUpdate(publicId, false);
         jdbcTemplate.update("UPDATE technicians SET deleted_at = now(), status = 'INACTIVE', updated_at = now() WHERE public_id = ?::uuid", publicId);
-        expireExternalOffers(longValue(requireTechnician(publicId, true), "id"), "기사 계정 삭제");
+        if ("EXTERNAL".equals(DbValueMapper.string(technician, "provider_type"))) {
+            expireExternalOffers(longValue(technician, "id"), "기사 계정 삭제");
+        }
         audit(admin, "TECHNICIAN_SOFT_DELETED", "technicians", publicId, Map.of());
         return Map.of("id", publicId, "deleted", true);
     }
@@ -367,7 +370,7 @@ public class AssemblyBrokerageService {
     @Transactional
     public Map<String, Object> restoreTechnician(String authorization, String publicId) {
         CurrentUserService.CurrentUser admin = currentUserService.requireAdmin(authorization);
-        requireTechnician(publicId, true);
+        requireTechnicianForUpdate(publicId, true);
         jdbcTemplate.update("UPDATE technicians SET deleted_at = NULL, status = 'INACTIVE', updated_at = now() WHERE public_id = ?::uuid", publicId);
         audit(admin, "TECHNICIAN_RESTORED", "technicians", publicId, Map.of("status", "INACTIVE"));
         return technicianMap(requireTechnician(publicId, true));
@@ -376,7 +379,7 @@ public class AssemblyBrokerageService {
     @Transactional
     public Map<String, Object> approveTechnician(String authorization, String publicId) {
         CurrentUserService.CurrentUser admin = currentUserService.requireAdmin(authorization);
-        Map<String, Object> technician = requireTechnician(publicId, false);
+        Map<String, Object> technician = requireTechnicianForUpdate(publicId, false);
         if (!"EXTERNAL".equals(DbValueMapper.string(technician, "provider_type"))) {
             throw conflict("외부 기사 신청만 승인할 수 있습니다.");
         }
@@ -395,7 +398,7 @@ public class AssemblyBrokerageService {
     @Transactional
     public Map<String, Object> rejectTechnician(String authorization, String publicId, Map<String, Object> body) {
         CurrentUserService.CurrentUser admin = currentUserService.requireAdmin(authorization);
-        Map<String, Object> technician = requireTechnician(publicId, false);
+        Map<String, Object> technician = requireTechnicianForUpdate(publicId, false);
         if (!"EXTERNAL".equals(DbValueMapper.string(technician, "provider_type"))) {
             throw conflict("외부 기사 신청만 거절할 수 있습니다.");
         }
@@ -891,7 +894,17 @@ public class AssemblyBrokerageService {
     }
 
     private Map<String, Object> requireTechnician(String publicId, boolean includeDeleted) {
-        String sql = "SELECT *, public_id::text AS public_id FROM technicians WHERE public_id = ?::uuid" + (includeDeleted ? "" : " AND deleted_at IS NULL");
+        return requireTechnician(publicId, includeDeleted, false);
+    }
+
+    private Map<String, Object> requireTechnicianForUpdate(String publicId, boolean includeDeleted) {
+        return requireTechnician(publicId, includeDeleted, true);
+    }
+
+    private Map<String, Object> requireTechnician(String publicId, boolean includeDeleted, boolean lock) {
+        String sql = "SELECT *, public_id::text AS public_id FROM technicians WHERE public_id = ?::uuid"
+                + (includeDeleted ? "" : " AND deleted_at IS NULL")
+                + (lock ? " FOR UPDATE" : "");
         return jdbcTemplate.queryForList(sql, publicId).stream().findFirst().orElseThrow(this::notFound);
     }
 
@@ -983,8 +996,8 @@ public class AssemblyBrokerageService {
         for (Map<String, Object> offer : offers) {
             Long offerId = longValue(offer, "id");
             jdbcTemplate.update("""
-                    UPDATE assembly_offers SET status = 'WITHDRAWN', admin_note = ?,
-                        withdrawn_at = now(), updated_at = now() WHERE id = ?
+                    UPDATE assembly_offers SET status = 'EXPIRED', admin_note = ?,
+                        updated_at = now() WHERE id = ?
                     """, reason, offerId);
             addOfferActivity(offerId, null, "ADMIN_WITHDRAWN", DbValueMapper.string(offer, "public_id"), reason);
         }

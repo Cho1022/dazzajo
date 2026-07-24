@@ -156,7 +156,7 @@ public class TechnicianMarketplaceService {
     @Transactional
     public Map<String, Object> createOffer(String authorization, String requestPublicId, Map<String, Object> body) {
         CurrentUserService.CurrentUser user = requireRegularUser(authorization);
-        Map<String, Object> technician = requireBidEligibleTechnician(user.internalId());
+        Map<String, Object> technician = requireBidEligibleTechnicianForUpdate(user.internalId());
         Map<String, Object> request = lockOpenRequest(requestPublicId, technician, user.internalId());
         Long requestId = longValue(request, "id");
         Long technicianId = longValue(technician, "id");
@@ -496,7 +496,10 @@ public class TechnicianMarketplaceService {
     }
 
     private Map<String, Object> requireApprovedExternalTechnician(Long userId) {
-        Map<String, Object> technician = technicianByUser(userId);
+        return requireApprovedExternalTechnician(technicianByUser(userId));
+    }
+
+    private Map<String, Object> requireApprovedExternalTechnician(Map<String, Object> technician) {
         if (technician == null
                 || !"EXTERNAL".equals(DbValueMapper.string(technician, "provider_type"))
                 || !"APPROVED".equals(DbValueMapper.string(technician, "verification_status"))) {
@@ -515,6 +518,15 @@ public class TechnicianMarketplaceService {
 
     private Map<String, Object> requireBidEligibleTechnician(Long userId) {
         Map<String, Object> technician = requireApprovedExternalTechnician(userId);
+        return requireBidEligibleTechnician(technician);
+    }
+
+    private Map<String, Object> requireBidEligibleTechnicianForUpdate(Long userId) {
+        Map<String, Object> technician = requireApprovedExternalTechnician(technicianByUser(userId, true));
+        return requireBidEligibleTechnician(technician);
+    }
+
+    private Map<String, Object> requireBidEligibleTechnician(Map<String, Object> technician) {
         if (!isBidEligible(technician)) {
             throw new ApiException(HttpStatus.FORBIDDEN, "FORBIDDEN", "활동 중이며 표준 AS에 동의한 기사만 입찰할 수 있습니다.");
         }
@@ -527,10 +539,15 @@ public class TechnicianMarketplaceService {
     }
 
     private Map<String, Object> technicianByUser(Long userId) {
+        return technicianByUser(userId, false);
+    }
+
+    private Map<String, Object> technicianByUser(Long userId, boolean lock) {
+        String suffix = lock ? " FOR UPDATE" : "";
         return jdbcTemplate.queryForList("""
                 SELECT *, public_id::text AS public_id FROM technicians
                 WHERE user_id = ? AND deleted_at IS NULL
-                """, userId).stream().findFirst().orElse(null);
+                """ + suffix, userId).stream().findFirst().orElse(null);
     }
 
     private Map<String, Object> ownOffer(Long requestId, Long technicianId) {

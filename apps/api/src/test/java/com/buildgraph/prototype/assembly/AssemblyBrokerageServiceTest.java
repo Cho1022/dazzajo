@@ -454,6 +454,72 @@ class AssemblyBrokerageServiceTest {
         );
     }
 
+    @Test
+    void inactivatingExternalTechnicianLocksTechnicianBeforeScanningAndExpiresAvailableOffers() {
+        stubAdmin();
+        Map<String, Object> technician = technicianRow("EXTERNAL");
+        Map<String, Object> offer = expiringOfferRow();
+        stubTechnicianMutationQueries(
+                technician,
+                List.of(Map.of("assembly_request_id", 11L), Map.of("assembly_request_id", 10L)),
+                List.of(offer)
+        );
+        java.util.ArrayList<Long> lockedRequestIds = stubExpirationStateQueries();
+        UpdateCapture capture = captureUpdates();
+
+        service.updateTechnician("Bearer admin", "technician-public-id", Map.of("status", "INACTIVE"));
+
+        assertThat(lockedRequestIds).containsExactly(10L, 11L);
+        SqlCall expired = capture.find("UPDATE assembly_offers SET status = 'EXPIRED'");
+        assertThat(expired.sql())
+                .contains("admin_note = ?")
+                .doesNotContain("status = 'WITHDRAWN'")
+                .doesNotContain("withdrawn_at");
+        assertThat(expired.params()).containsExactly("기사 운영 상태 변경", 20L);
+
+        InOrder order = inOrder(jdbcTemplate);
+        order.verify(jdbcTemplate).queryForList(
+                argThat((String sql) -> isTechnicianQuery(sql) && sql.contains("FOR UPDATE")),
+                any(Object[].class)
+        );
+        order.verify(jdbcTemplate).update(
+                argThat((String sql) -> sql != null && sql.contains("UPDATE technicians SET")),
+                any(Object[].class)
+        );
+        order.verify(jdbcTemplate).queryForList(
+                argThat((String sql) -> sql != null && sql.contains("SELECT DISTINCT assembly_request_id")),
+                any(Object[].class)
+        );
+        order.verify(jdbcTemplate, org.mockito.Mockito.times(2)).queryForObject(
+                contains("SELECT id FROM assembly_requests WHERE id = ? FOR UPDATE"),
+                eq(Long.class),
+                any(Object[].class)
+        );
+        order.verify(jdbcTemplate).queryForList(
+                argThat((String sql) -> sql != null
+                        && sql.contains("WHERE technician_id = ? AND status = 'AVAILABLE'")
+                        && sql.contains("FOR UPDATE")),
+                any(Object[].class)
+        );
+        order.verify(jdbcTemplate).update(
+                argThat((String sql) -> sql != null
+                        && sql.contains("UPDATE assembly_offers SET status = 'EXPIRED'")),
+                any(Object[].class)
+        );
+    }
+
+    @Test
+    void rejectingAndDeletingExternalTechnicianLockBeforeQualificationChangeAndOfferScan() {
+        assertExternalRevocationStartsWithTechnicianLock(false);
+        assertExternalRevocationStartsWithTechnicianLock(true);
+    }
+
+    @Test
+    void internalTechnicianStatusChangesDoNotExpireAutomaticOffers() {
+        assertInternalMutationDoesNotExpire(false);
+        assertInternalMutationDoesNotExpire(true);
+    }
+
     private static void assertOffer(Map<String, Object> response) {
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> offers = (List<Map<String, Object>>) response.get("offers");
@@ -584,6 +650,110 @@ class AssemblyBrokerageServiceTest {
         ));
     }
 
+    private void stubAdmin() {
+        when(currentUserService.requireAdmin("Bearer admin")).thenReturn(new CurrentUserService.CurrentUser(
+                1L, "admin-public-id", "admin@example.com", "Admin", "ADMIN", null
+        ));
+    }
+
+    private void assertExternalRevocationStartsWithTechnicianLock(boolean delete) {
+        org.mockito.Mockito.reset(jdbcTemplate, currentUserService);
+        stubAdmin();
+        stubTechnicianMutationQueries(technicianRow("EXTERNAL"), List.of(), List.of());
+        captureUpdates();
+
+        if (delete) {
+            service.deleteTechnician("Bearer admin", "technician-public-id");
+        } else {
+            service.rejectTechnician(
+                    "Bearer admin",
+                    "technician-public-id",
+                    Map.of("reason", "자격 검증 실패")
+            );
+        }
+
+        InOrder order = inOrder(jdbcTemplate);
+        order.verify(jdbcTemplate).queryForList(
+                argThat((String sql) -> isTechnicianQuery(sql) && sql.contains("FOR UPDATE")),
+                any(Object[].class)
+        );
+        order.verify(jdbcTemplate).update(
+                argThat((String sql) -> sql != null && sql.contains("UPDATE technicians SET")),
+                any(Object[].class)
+        );
+        order.verify(jdbcTemplate).queryForList(
+                argThat((String sql) -> sql != null && sql.contains("SELECT DISTINCT assembly_request_id")),
+                any(Object[].class)
+        );
+    }
+
+    private void assertInternalMutationDoesNotExpire(boolean delete) {
+        org.mockito.Mockito.reset(jdbcTemplate, currentUserService);
+        stubAdmin();
+        stubTechnicianMutationQueries(technicianRow("INTERNAL"), List.of(), List.of());
+        UpdateCapture capture = captureUpdates();
+
+        if (delete) {
+            service.deleteTechnician("Bearer admin", "technician-public-id");
+        } else {
+            service.updateTechnician("Bearer admin", "technician-public-id", Map.of("status", "INACTIVE"));
+        }
+
+        verify(jdbcTemplate, never()).queryForList(
+                argThat((String sql) -> sql != null && sql.contains("SELECT DISTINCT assembly_request_id")),
+                any(Object[].class)
+        );
+        assertThat(capture.calls().stream()
+                .noneMatch(call -> call.sql().contains("UPDATE assembly_offers"))).isTrue();
+    }
+
+    private void stubTechnicianMutationQueries(
+            Map<String, Object> technician,
+            List<Map<String, Object>> requestIds,
+            List<Map<String, Object>> offers
+    ) {
+        when(jdbcTemplate.queryForList(anyString(), any(Object[].class))).thenAnswer(invocation -> {
+            String sql = invocation.getArgument(0);
+            if (isTechnicianQuery(sql)) {
+                return List.of(technician);
+            }
+            if (sql.contains("SELECT DISTINCT assembly_request_id")) {
+                return requestIds;
+            }
+            if (sql.contains("WHERE technician_id = ? AND status = 'AVAILABLE'")
+                    && sql.contains("FOR UPDATE")) {
+                return offers;
+            }
+            if (sql.contains("FROM assembly_offers WHERE id = ?")) {
+                return offers;
+            }
+            throw new AssertionError("예상하지 않은 기사 상태 변경 조회 SQL: " + sql);
+        });
+    }
+
+    private java.util.ArrayList<Long> stubExpirationStateQueries() {
+        java.util.ArrayList<Long> lockedRequestIds = new java.util.ArrayList<>();
+        when(jdbcTemplate.queryForObject(
+                contains("SELECT id FROM assembly_requests WHERE id = ? FOR UPDATE"),
+                eq(Long.class),
+                any(Object[].class)
+        )).thenAnswer(invocation -> {
+            Number requestId = invocation.getArgument(2);
+            lockedRequestIds.add(requestId.longValue());
+            return requestId.longValue();
+        });
+        when(jdbcTemplate.queryForObject(
+                contains("SELECT count(*) FROM assembly_offers WHERE assembly_request_id"),
+                eq(Integer.class),
+                any(Object[].class)
+        )).thenReturn(1);
+        return lockedRequestIds;
+    }
+
+    private static boolean isTechnicianQuery(String sql) {
+        return sql != null && sql.contains("FROM technicians WHERE public_id");
+    }
+
     private void assertUnavailableOfferRejected(String status) {
         stubUser();
         stubSelectionQueries(requestRow(), selectionOffer(status));
@@ -653,10 +823,23 @@ class AssemblyBrokerageServiceTest {
         row.put("service_regions", List.of("서울"));
         row.put("service_types", List.of("FULL_SERVICE", "ASSEMBLY_ONLY"));
         row.put("specialties", List.of("안정성 검증"));
+        row.put("completed_jobs", 0);
+        row.put("avg_response_minutes", 0);
         row.put("assembly_fee", 50_000L);
         row.put("delivery_fee", 12_000L);
         row.put("parts_price_adjustment", 25_000L);
         row.put("lead_time_days", 2);
+        return row;
+    }
+
+    private static Map<String, Object> expiringOfferRow() {
+        Map<String, Object> row = new HashMap<>();
+        row.put("id", 20L);
+        row.put("public_id", "offer-public-id");
+        row.put("assembly_request_id", 10L);
+        row.put("status", "AVAILABLE");
+        row.put("warranty_days", 90);
+        row.put("proposal_message", "안정성 테스트 포함");
         return row;
     }
 

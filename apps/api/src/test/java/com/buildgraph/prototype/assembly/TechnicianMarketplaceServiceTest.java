@@ -9,6 +9,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -221,6 +222,107 @@ class TechnicianMarketplaceServiceTest {
         Map<String, Object> blank = baseCreateBody();
         blank.put("message", "   ");
         assertThat(runCreateOffer(blank).params()[10]).isNull();
+    }
+
+    @Test
+    void createOfferLocksTechnicianBeforeRequestAndKeepsExistingGuards() {
+        runCreateOffer(baseCreateBody());
+
+        InOrder order = inOrder(jdbcTemplate);
+        order.verify(jdbcTemplate).queryForList(
+                argThat((String sql) -> sql != null
+                        && sql.contains("FROM technicians")
+                        && sql.contains("FOR UPDATE")),
+                any(Object[].class)
+        );
+        order.verify(jdbcTemplate).queryForList(
+                argThat((String sql) -> sql != null
+                        && sql.contains("FROM assembly_requests")
+                        && sql.contains("FOR UPDATE")),
+                any(Object[].class)
+        );
+        verify(jdbcTemplate).queryForObject(
+                contains("technician_id = ?"),
+                eq(Integer.class),
+                any(Object[].class)
+        );
+        verify(jdbcTemplate).queryForObject(
+                argThat((String sql) -> sql != null
+                        && sql.contains("JOIN technicians t")
+                        && sql.contains("t.provider_type = 'EXTERNAL'")),
+                eq(Integer.class),
+                any(Object[].class)
+        );
+    }
+
+    @Test
+    void createOfferRejectsSuspendedInactiveRejectedAndInternalTechniciansBeforeRequestLock() {
+        Map<String, Object> suspended = technicianRow();
+        suspended.put("status", "SUSPENDED");
+        assertCreateRejectedBeforeRequestLock(suspended, "활동 중이며 표준 AS에 동의한 기사만 입찰할 수 있습니다.");
+
+        Map<String, Object> inactive = technicianRow();
+        inactive.put("status", "INACTIVE");
+        assertCreateRejectedBeforeRequestLock(inactive, "활동 중이며 표준 AS에 동의한 기사만 입찰할 수 있습니다.");
+
+        Map<String, Object> asNotAccepted = technicianRow();
+        asNotAccepted.put("standard_as_accepted", false);
+        assertCreateRejectedBeforeRequestLock(asNotAccepted, "활동 중이며 표준 AS에 동의한 기사만 입찰할 수 있습니다.");
+
+        Map<String, Object> rejected = technicianRow();
+        rejected.put("verification_status", "REJECTED");
+        assertCreateRejectedBeforeRequestLock(rejected, "승인된 외부 기사만 이용할 수 있습니다.");
+
+        Map<String, Object> internal = technicianRow();
+        internal.put("provider_type", "INTERNAL");
+        assertCreateRejectedBeforeRequestLock(internal, "승인된 외부 기사만 이용할 수 있습니다.");
+    }
+
+    @Test
+    void createOfferKeepsOwnRequestDuplicateAndExternalLimitRejections() {
+        reset(jdbcTemplate, currentUserService);
+        when(currentUserService.requireUser("Bearer user")).thenReturn(new CurrentUserService.CurrentUser(
+                2L, "user-public-id", "user@example.com", "User", "USER", null
+        ));
+        when(jdbcTemplate.queryForList(contains("FROM technicians"), any(Object[].class)))
+                .thenReturn(List.of(technicianRow()));
+        Map<String, Object> ownRequest = requestRow();
+        ownRequest.put("user_id", 2L);
+        when(jdbcTemplate.queryForList(
+                contains("SELECT * FROM assembly_requests WHERE public_id"), any(Object[].class)
+        )).thenReturn(List.of(ownRequest));
+
+        assertApiException(
+                () -> service.createOffer("Bearer user", "request-public-id", baseCreateBody()),
+                HttpStatus.NOT_FOUND,
+                "NOT_FOUND"
+        );
+        assertNoOfferInsert();
+
+        stubOfferWorkflow(offerRow(), offerRow());
+        when(jdbcTemplate.queryForObject(
+                contains("technician_id = ?"), eq(Integer.class), any(Object[].class)
+        )).thenReturn(1);
+        assertApiException(
+                () -> service.createOffer("Bearer user", "request-public-id", baseCreateBody()),
+                HttpStatus.CONFLICT,
+                "CONFLICT_STATE"
+        );
+        assertNoOfferInsert();
+
+        stubOfferWorkflow(offerRow(), offerRow());
+        when(jdbcTemplate.queryForObject(
+                contains("technician_id = ?"), eq(Integer.class), any(Object[].class)
+        )).thenReturn(0);
+        when(jdbcTemplate.queryForObject(
+                contains("JOIN technicians t"), eq(Integer.class), any(Object[].class)
+        )).thenReturn(3);
+        assertApiException(
+                () -> service.createOffer("Bearer user", "request-public-id", baseCreateBody()),
+                HttpStatus.CONFLICT,
+                "CONFLICT_STATE"
+        );
+        assertNoOfferInsert();
     }
 
     @Test
@@ -454,6 +556,64 @@ class TechnicianMarketplaceServiceTest {
         service.updateOffer("Bearer user", "offer-public-id", body);
 
         return capture.find("UPDATE assembly_offers SET confirmed_parts_price");
+    }
+
+    private void assertCreateRejectedBeforeRequestLock(Map<String, Object> technician, String message) {
+        reset(jdbcTemplate, currentUserService);
+        when(currentUserService.requireUser("Bearer user")).thenReturn(new CurrentUserService.CurrentUser(
+                2L, "user-public-id", "user@example.com", "User", "USER", null
+        ));
+        when(jdbcTemplate.queryForList(
+                argThat((String sql) -> sql != null
+                        && sql.contains("FROM technicians")
+                        && sql.contains("FOR UPDATE")),
+                any(Object[].class)
+        )).thenReturn(List.of(technician));
+
+        assertThatThrownBy(() -> service.createOffer("Bearer user", "request-public-id", baseCreateBody()))
+                .isInstanceOf(ApiException.class)
+                .satisfies(error -> {
+                    ApiException apiException = (ApiException) error;
+                    assertThat(apiException.status()).isEqualTo(HttpStatus.FORBIDDEN);
+                    assertThat(apiException.code()).isEqualTo("FORBIDDEN");
+                    assertThat(apiException.getMessage()).isEqualTo(message);
+                });
+
+        verify(jdbcTemplate).queryForList(
+                argThat((String sql) -> sql != null
+                        && sql.contains("FROM technicians")
+                        && sql.contains("FOR UPDATE")),
+                any(Object[].class)
+        );
+        verify(jdbcTemplate, never()).queryForList(
+                argThat((String sql) -> sql != null
+                        && sql.contains("FROM assembly_requests")
+                        && sql.contains("FOR UPDATE")),
+                any(Object[].class)
+        );
+        verify(jdbcTemplate, never()).queryForObject(
+                argThat((String sql) -> sql != null && sql.contains("INSERT INTO assembly_offers")),
+                eq(String.class),
+                any(Object[].class)
+        );
+    }
+
+    private void assertApiException(Runnable action, HttpStatus status, String code) {
+        assertThatThrownBy(action::run)
+                .isInstanceOf(ApiException.class)
+                .satisfies(error -> {
+                    ApiException apiException = (ApiException) error;
+                    assertThat(apiException.status()).isEqualTo(status);
+                    assertThat(apiException.code()).isEqualTo(code);
+                });
+    }
+
+    private void assertNoOfferInsert() {
+        verify(jdbcTemplate, never()).queryForObject(
+                argThat((String sql) -> sql != null && sql.contains("INSERT INTO assembly_offers")),
+                eq(String.class),
+                any(Object[].class)
+        );
     }
 
     private UpdateCapture stubOfferWorkflow(Map<String, Object> before, Map<String, Object> after) {
