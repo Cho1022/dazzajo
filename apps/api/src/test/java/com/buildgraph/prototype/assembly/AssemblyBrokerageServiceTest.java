@@ -76,6 +76,111 @@ class AssemblyBrokerageServiceTest {
     }
 
     @Test
+    void userRequestListMapsInternalExternalAndUnselectedProviderIdentity() {
+        stubUser();
+        Map<String, Object> internal = requestSummaryRow(
+                "request-internal", "MATCHED", "INTERNAL_FAKE_TECHNICIAN_RFQ_5B2A", "INTERNAL"
+        );
+        internal.put("final_price", 1_900_000L);
+        internal.put("payment_status", "PAID");
+        Map<String, Object> external = requestSummaryRow(
+                "request-external", "MATCHED", "외부 기사 테스트", "EXTERNAL"
+        );
+        external.put("final_price", 1_920_000L);
+        external.put("payment_status", "PENDING");
+        Map<String, Object> unselected = requestSummaryRow("request-unselected", "REQUESTED", null, null);
+
+        when(jdbcTemplate.queryForList(
+                argThat((String sql) -> sql != null && sql.contains("WHERE ar.user_id = ?")),
+                any(Object[].class)
+        )).thenReturn(List.of(internal, external, unselected));
+        when(jdbcTemplate.queryForObject(
+                contains("SELECT count(*) FROM assembly_requests WHERE user_id = ?"),
+                eq(Long.class),
+                eq(2L)
+        )).thenReturn(3L);
+
+        Map<String, Object> response = service.listForUser("Bearer user", 0, 20);
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> items = (List<Map<String, Object>>) response.get("items");
+        assertThat(items).hasSize(3);
+        assertThat(items.get(0))
+                .containsEntry("status", "MATCHED")
+                .containsEntry("providerType", "INTERNAL")
+                .containsEntry("technicianName", "INTERNAL_FAKE_TECHNICIAN_RFQ_5B2A")
+                .containsEntry("finalPrice", 1_900_000L)
+                .containsEntry("paymentStatus", "PAID");
+        assertThat(items.get(1))
+                .containsEntry("providerType", "EXTERNAL")
+                .containsEntry("technicianName", "외부 기사 테스트")
+                .containsEntry("finalPrice", 1_920_000L)
+                .containsEntry("paymentStatus", "PENDING");
+        assertThat(items.get(2))
+                .containsEntry("status", "REQUESTED")
+                .containsEntry("providerType", null)
+                .containsEntry("technicianName", null)
+                .containsEntry("finalPrice", null)
+                .containsEntry("paymentStatus", null);
+    }
+
+    @Test
+    void ownerDetailMapsInternalProviderIdentityWithoutChangingSelectedOfferData() {
+        stubUser();
+        Map<String, Object> request = requestRow();
+        request.put("status", "MATCHED");
+        request.put("selected_offer_public_id", "offer-public-id");
+        Map<String, Object> offer = offerRow();
+        offer.put("status", "SELECTED");
+        offer.put("technician_snapshot", Map.of(
+                "displayName", "INTERNAL_FAKE_TECHNICIAN_RFQ_5B2A",
+                "initials", "플",
+                "providerType", "INTERNAL",
+                "verificationStatus", "APPROVED"
+        ));
+        offer.put("provider_type", "INTERNAL");
+        when(jdbcTemplate.queryForList(anyString(), any(Object[].class))).thenAnswer(invocation -> {
+            String sql = invocation.getArgument(0);
+            if (sql.contains("SELECT id FROM assembly_requests WHERE public_id")) {
+                return List.of(Map.of("id", 10L));
+            }
+            if (sql.contains("SELECT ar.*, ar.public_id::text AS public_id_text")) {
+                return List.of(request);
+            }
+            if (sql.contains("FROM assembly_payments WHERE assembly_request_id")) {
+                return List.of(paymentRow("PENDING"));
+            }
+            if (sql.contains("FROM assembly_payment_attempts")
+                    || sql.contains("FROM assembly_request_items WHERE assembly_request_id")
+                    || sql.contains("FROM assembly_request_status_history")) {
+                return List.of();
+            }
+            if (sql.contains("FROM assembly_offers ao JOIN technicians")) {
+                return List.of(offer);
+            }
+            throw new AssertionError("예상하지 않은 INTERNAL 상세 조회 SQL: " + sql);
+        });
+
+        Map<String, Object> response = service.detailForUser("Bearer user", "request-public-id");
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> offers = (List<Map<String, Object>>) response.get("offers");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> payment = (Map<String, Object>) response.get("payment");
+        assertThat(response)
+                .containsEntry("status", "MATCHED")
+                .containsEntry("selectedOfferId", "offer-public-id");
+        assertThat(offers.getFirst())
+                .containsEntry("status", "SELECTED")
+                .containsEntry("providerType", "INTERNAL")
+                .containsEntry("technicianName", "INTERNAL_FAKE_TECHNICIAN_RFQ_5B2A")
+                .containsEntry("finalPrice", 74_000L);
+        assertThat(payment)
+                .containsEntry("status", "PENDING")
+                .containsEntry("amount", 1_900_000L);
+    }
+
+    @Test
     void internalAutomaticOfferUsesSnapshotAndAssemblyFeeWithoutAdjustmentOrDeliveryFee() {
         UpdateCapture capture = captureUpdates();
         Map<String, Object> technician = technicianRow("INTERNAL");
@@ -358,6 +463,7 @@ class AssemblyBrokerageServiceTest {
                 .containsEntry("warrantyDays", 90)
                 .containsEntry("message", "안정성 테스트 포함")
                 .containsEntry("adminNote", "관리자 확인 메모")
+                .containsEntry("providerType", "EXTERNAL")
                 .containsEntry("confirmedPartsPrice", 1_000L)
                 .containsEntry("finalPrice", 74_000L);
         assertThat(offers.getFirst().get("message")).isNotEqualTo(offers.getFirst().get("adminNote"));
@@ -376,6 +482,32 @@ class AssemblyBrokerageServiceTest {
         row.put("estimated_parts_price", 1_000L);
         row.put("item_count", 1);
         row.put("as_policy_accepted", true);
+        return row;
+    }
+
+    private static Map<String, Object> requestSummaryRow(
+            String id,
+            String status,
+            String technicianName,
+            String providerType
+    ) {
+        Map<String, Object> row = new HashMap<>();
+        row.put("id", id);
+        row.put("request_no", "ASM-" + id);
+        row.put("status", status);
+        row.put("service_type", "FULL_SERVICE");
+        row.put("region", "서울");
+        row.put("preferred_date", "2099-07-20");
+        row.put("delivery_method", "DELIVERY");
+        row.put("estimated_parts_price", 1_850_000L);
+        row.put("item_count", 2);
+        row.put("available_offer_count", 0);
+        if (technicianName != null || providerType != null) {
+            row.put("technician_snapshot", Map.of(
+                    "displayName", technicianName,
+                    "providerType", providerType
+            ));
+        }
         return row;
     }
 

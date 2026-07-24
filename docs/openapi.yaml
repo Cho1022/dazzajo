@@ -10369,7 +10369,7 @@ components:
         externalOffer: { type: object, nullable: true, additionalProperties: true }
     AssemblyOfferDto:
       type: object
-      required: [id, technicianId, technicianName, status, confirmedPartsPrice, assemblyFee, deliveryFee, finalPrice, leadTimeDays, stockStatus, warrantyDays]
+      required: [id, technicianId, technicianName, providerType, status, confirmedPartsPrice, assemblyFee, deliveryFee, finalPrice, leadTimeDays, stockStatus, warrantyDays]
       properties:
         id: { type: string, format: uuid }
         technicianId: { type: string, format: uuid }
@@ -10423,8 +10423,38 @@ components:
             items:
               type: array
               items:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/AssemblyRequestSummaryDto"
+    AssemblyRequestSummaryDto:
+      type: object
+      required: [id, requestNo, status, serviceType, region, preferredDate, deliveryMethod, estimatedPartsPrice, itemCount, availableOfferCount, finalPrice, technicianName, providerType, paymentStatus]
+      properties:
+        id: { type: string, format: uuid }
+        requestNo: { type: string }
+        status:
+          type: string
+          enum: [REQUESTED, OFFERED, MATCHED, CONFIRMED, ASSEMBLING, SHIPPED, COMPLETED, CANCELLED]
+        serviceType: { type: string, enum: [FULL_SERVICE, ASSEMBLY_ONLY] }
+        region: { type: string }
+        preferredDate: { type: string, format: date }
+        deliveryMethod: { type: string, enum: [DELIVERY, PICKUP] }
+        estimatedPartsPrice: { type: integer, format: int64 }
+        itemCount: { type: integer }
+        availableOfferCount: { type: integer }
+        finalPrice: { type: integer, format: int64, nullable: true }
+        technicianName: { type: string, nullable: true }
+        providerType:
+          type: string
+          enum: [INTERNAL, EXTERNAL]
+          nullable: true
+          description: 선택 제안의 기사 유형. 선택 제안이 없으면 null이다.
+        paymentStatus:
+          type: string
+          enum: [PENDING, PAID, CANCELLED, REFUNDED]
+          nullable: true
+        userEmail: { type: string, format: email, nullable: true }
+        userName: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time, nullable: true }
+        updatedAt: { type: string, format: date-time, nullable: true }
     AssemblyStatusUpdateRequest:
       type: object
       required: [status]

@@ -6221,6 +6221,158 @@ test('keeps the checkout request panel expanded while editing contact informatio
   expect(heightChanges).not.toContain('0px');
 });
 
+test('shows INTERNAL and EXTERNAL selected providers consistently in request history and detail', async ({ page }) => {
+  const internalRequestId = '00000000-0000-4000-8000-000000020013';
+  const externalRequestId = '00000000-0000-4000-8000-000000020014';
+  const internalTechnicianName = 'INTERNAL_FAKE_TECHNICIAN_RFQ_5B2A';
+  const externalTechnicianName = '외부 기사 테스트';
+  const selectedOffer = (
+    id: string,
+    providerType: 'INTERNAL' | 'EXTERNAL',
+    technicianName: string,
+    finalPrice: number
+  ) => ({
+    id,
+    technicianId: `${id}-technician`,
+    technicianName,
+    initials: technicianName.slice(0, 1),
+    rating: 4.9,
+    completedJobs: 184,
+    responseMinutes: 12,
+    specialties: ['안정성 검증'],
+    standardAsAccepted: true,
+    providerType,
+    verified: true,
+    status: 'SELECTED',
+    confirmedPartsPrice: 1_400_000,
+    assemblyFee: finalPrice - 1_400_000,
+    deliveryFee: 0,
+    finalPrice,
+    leadTimeDays: 2,
+    stockStatus: '재고 확인 완료',
+    warrantyDays: 90,
+    message: '선택 제안 메시지'
+  });
+  const requestDetail = (
+    id: string,
+    requestNo: string,
+    offer: ReturnType<typeof selectedOffer>
+  ) => ({
+    id,
+    requestNo,
+    status: 'MATCHED',
+    serviceType: 'FULL_SERVICE',
+    region: '서울',
+    preferredDate: '2099-07-20',
+    deliveryMethod: 'DELIVERY',
+    note: '',
+    contact: { name: 'Demo User', phone: null },
+    asPolicyAccepted: true,
+    estimatedPartsPrice: 1_400_000,
+    itemCount: 2,
+    selectedOfferId: offer.id,
+    canCancel: true,
+    items: [],
+    offers: [offer],
+    payment: {
+      id: `${id}-payment`,
+      amount: offer.finalPrice,
+      paidAmount: 0,
+      currency: 'KRW',
+      provider: 'LEGACY_VIRTUAL',
+      method: 'VIRTUAL',
+      status: 'PENDING'
+    },
+    statusHistory: [{ fromStatus: 'OFFERED', toStatus: 'MATCHED', note: '제안 선택' }]
+  });
+  const internalOffer = selectedOffer('offer-internal-history', 'INTERNAL', internalTechnicianName, 1_470_000);
+  const externalOffer = selectedOffer('offer-external-history', 'EXTERNAL', externalTechnicianName, 1_495_000);
+  const details = new Map([
+    [internalRequestId, requestDetail(internalRequestId, 'ASM-INTERNAL-HISTORY', internalOffer)],
+    [externalRequestId, requestDetail(externalRequestId, 'ASM-EXTERNAL-HISTORY', externalOffer)]
+  ]);
+
+  await page.addInitScript(() => localStorage.setItem('buildgraph.token', 'jwt-user-token'));
+  await page.route('**/api/assembly-requests**', async (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    const pathParts = pathname.split('/');
+    const requestId = pathParts[pathParts.length - 1];
+    const detail = requestId ? details.get(requestId) : undefined;
+    if (detail) {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(detail) });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        items: [
+          {
+            id: internalRequestId,
+            requestNo: 'ASM-INTERNAL-HISTORY',
+            status: 'MATCHED',
+            serviceType: 'FULL_SERVICE',
+            region: '서울',
+            preferredDate: '2099-07-20',
+            deliveryMethod: 'DELIVERY',
+            estimatedPartsPrice: 1_400_000,
+            itemCount: 2,
+            availableOfferCount: 0,
+            finalPrice: internalOffer.finalPrice,
+            technicianName: internalTechnicianName,
+            providerType: 'INTERNAL',
+            paymentStatus: 'PENDING'
+          },
+          {
+            id: externalRequestId,
+            requestNo: 'ASM-EXTERNAL-HISTORY',
+            status: 'MATCHED',
+            serviceType: 'FULL_SERVICE',
+            region: '서울',
+            preferredDate: '2099-07-20',
+            deliveryMethod: 'DELIVERY',
+            estimatedPartsPrice: 1_400_000,
+            itemCount: 2,
+            availableOfferCount: 0,
+            finalPrice: externalOffer.finalPrice,
+            technicianName: externalTechnicianName,
+            providerType: 'EXTERNAL',
+            paymentStatus: 'PENDING'
+          }
+        ],
+        page: 0,
+        size: 20,
+        total: 2
+      })
+    });
+  });
+
+  await page.goto('/my/assembly-requests');
+
+  const internalHistory = page.locator(`a[href="/my/assembly-requests/${internalRequestId}"]`);
+  const externalHistory = page.locator(`a[href="/my/assembly-requests/${externalRequestId}"]`);
+  await expect(internalHistory).toContainText('플랫폼 즉시 제안');
+  await expect(internalHistory).not.toContainText(internalTechnicianName);
+  await expect(internalHistory).toContainText('1,470,000원');
+  await expect(internalHistory).toContainText('결제 PENDING');
+  await expect(externalHistory).toContainText(externalTechnicianName);
+  await expect(externalHistory).not.toContainText('플랫폼 즉시 제안');
+  await expect(externalHistory).toContainText('1,495,000원');
+
+  await page.goto(`/my/assembly-requests/${internalRequestId}`);
+  await expect(page.getByRole('heading', { name: '조립 요청 진행 상태' })).toBeVisible();
+  await expect(page.getByText('플랫폼 즉시 제안', { exact: true })).toBeVisible();
+  await expect(page.getByText(internalTechnicianName)).toHaveCount(0);
+  await expect(page.getByText('1,470,000원')).toBeVisible();
+  await expect(page.getByText('PENDING')).toBeVisible();
+
+  await page.goto(`/my/assembly-requests/${externalRequestId}`);
+  await expect(page.getByRole('heading', { name: '조립 요청 진행 상태' })).toBeVisible();
+  await expect(page.getByText(externalTechnicianName, { exact: true })).toBeVisible();
+  await expect(page.getByText('플랫폼 즉시 제안', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('1,495,000원')).toBeVisible();
+});
+
 test('shows a newly arrived technician offer from the in-progress request without reload', async ({ page }) => {
   const requestId = '00000000-0000-4000-8000-000000020012';
   let detailCalls = 0;

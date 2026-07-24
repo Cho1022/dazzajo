@@ -417,6 +417,7 @@ Google OAuth 정책:
 - `proposal_message`는 요청 사용자에게 보여줄 기사 제안이고 `admin_note`는 관리자·운영 메모다. 두 값을 서로 대체하지 않으며, 기사 본인 응답의 기존 `note`는 `message`와 같은 값인 하위 호환 alias다.
 - 외부 기사 제안은 별도 관리자 승인을 거치지 않고 사용자 제안 비교 화면에 즉시 노출된다. 사용자가 하나를 선택하면 나머지 내부·외부 제안은 `EXPIRED`가 된다.
 - 사용자의 `/my/assembly-requests` 목록과 진행 상세는 열린 요청을 polling한다. `OFFERED` 상태에는 `/checkout/offers/{id}` 진입 동선을 제공해 화면을 나갔다 돌아와도 기사 제안을 비교·선택할 수 있다.
+- 사용자 조립 요청 목록의 선택 제안 summary는 nullable `providerType`(`INTERNAL`/`EXTERNAL`)과 snapshot `technicianName`을 함께 반환한다. 선택 제안이 없으면 두 값은 null이며, 사용자 화면은 INTERNAL을 snapshot 기사명과 무관하게 `플랫폼 즉시 제안`으로 표시하고 EXTERNAL은 공개 기사명을 유지한다. 상세의 `offers[].providerType`도 같은 의미를 사용한다.
 - 입찰 전에는 기사에게 지역, 일정, 서비스 방식, 부품 snapshot만 공개한다. 선택된 제안의 가상 결제가 `PAID`가 된 뒤에만 선택 기사에게 연락처, 주소, 자유 메모를 공개한다.
 - 외부 기사 프로필은 `PENDING/APPROVED/REJECTED` 검증 상태를 가진다. `APPROVED + ACTIVE + 표준 AS 동의`만 신규 요청함과 입찰 API를 이용할 수 있으며, 정지·거절·삭제 시 미선택 제안은 즉시 철회한다. 승인 후 정지된 기사는 기존에 선택된 작업 조회는 계속할 수 있다.
 - 요청 snapshot은 생성 후 수정하지 않는다. 사용자는 `ASSEMBLING` 전까지 취소한 뒤 새 요청을 만든다.

@@ -110,6 +110,7 @@ export type AssemblyRequestSummary = Pick<AssemblyRequest,
 > & {
   finalPrice?: number | null;
   technicianName?: string | null;
+  providerType?: 'INTERNAL' | 'EXTERNAL' | null;
   paymentStatus?: AssemblyPaymentStatus | null;
   availableOfferCount?: number;
   userEmail?: string | null;

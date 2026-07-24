@@ -658,6 +658,7 @@ public class AssemblyBrokerageService {
                 "availableOfferCount", DbValueMapper.integer(row, "available_offer_count"),
                 "finalPrice", nullableLong(row.get("final_price")),
                 "technicianName", text(tech.get("displayName")),
+                "providerType", text(tech.get("providerType")),
                 "paymentStatus", DbValueMapper.string(row, "payment_status"),
                 "createdAt", DbValueMapper.timestamp(row, "created_at"),
                 "updatedAt", DbValueMapper.timestamp(row, "updated_at")

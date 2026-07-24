@@ -552,7 +552,7 @@ function AssemblyHistoryCard({ request }: { request: AssemblyRequestSummary }) {
         <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs font-bold text-slate-500">
           <span>{request.region}</span>
           <span>{request.preferredDate}</span>
-          <span>{request.technicianName ?? '기사 배정 전'}</span>
+          <span>{requestTechnicianDisplayName(request)}</span>
           <span>부품 {request.itemCount}개</span>
         </div>
         {hasAvailableOffer ? (
@@ -596,6 +596,11 @@ function offerStatusRank(offer: AssemblyOffer) { return offer.status === 'SELECT
 function offerCreatedTime(offer: AssemblyOffer) {
   const time = offer.createdAt ? new Date(offer.createdAt).getTime() : 0;
   return Number.isNaN(time) ? 0 : time;
+}
+function requestTechnicianDisplayName(request: AssemblyRequestSummary) {
+  return request.providerType === 'INTERNAL'
+    ? '플랫폼 즉시 제안'
+    : request.technicianName ?? '기사 배정 전';
 }
 function offerDisplayName(offer: AssemblyOffer) { return offer.providerType === 'EXTERNAL' ? offer.technicianName : '플랫폼 즉시 제안'; }
 function offerMessage(offer: AssemblyOffer) {
