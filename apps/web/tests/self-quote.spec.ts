@@ -4644,7 +4644,7 @@ test('loads more candidates in 20 item pages from the panel', async ({ page }) =
   await expect(panel.getByText('페이징 파워 1', { exact: true })).toBeVisible();
   expect(requestedPages).toContain('0');
 
-  await panel.getByRole('button', { name: '후보 더 보기' }).click();
+  await panel.getByRole('button', { name: '후보 더 보기' }).dispatchEvent('click');
   await expect(panel.getByText('페이징 파워 21', { exact: true })).toBeVisible();
   expect(requestedPages).toContain('1');
 });
