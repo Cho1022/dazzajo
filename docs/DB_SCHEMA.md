@@ -2729,14 +2729,14 @@ V108__visit_support_reservations_exact_time.sql
 
 ## 조립 기사 중개
 
-`V115__assembly_brokerage.sql`은 견적 snapshot 기반의 조립 요청, 기사 제안, 가상 결제와 진행 이력을 추가한다. `V116__external_technician_bidding.sql`은 기존 USER 계정과 연결된 외부 기사 신청·직접 입찰 및 제안 활동 이력을 추가한다.
+`V115__assembly_brokerage.sql`은 견적 snapshot 기반의 조립 요청, 기사 제안, 가상 결제와 진행 이력을 추가한다. `V116__external_technician_bidding.sql`은 기존 USER 계정과 연결된 외부 기사 신청·직접 입찰 및 제안 활동 이력을 추가한다. `V134__assembly_offer_rfq_contract.sql`은 기존 가격·상태를 변경하지 않고 기사 제안에 `warranty_days`와 `proposal_message`를 추가한다.
 
 | table | 책임 | 주요 상태/정책 |
 |---|---|---|
 | `technicians` | 내부 기사 또는 USER 계정과 1:1 연결된 외부 기사 프로필 | `provider_type=INTERNAL/EXTERNAL`, `verification_status=PENDING/APPROVED/REJECTED`, `ACTIVE/INACTIVE/SUSPENDED`, soft delete. `seeded=true`는 관리자 화면에만 노출한다. |
 | `assembly_requests` | 사용자 조립 요청과 원본 견적/호환성 snapshot 및 연락처·배송 주소 | `REQUESTED/OFFERED/MATCHED/CONFIRMED/ASSEMBLING/SHIPPED/COMPLETED/CANCELLED`. 연락처와 주소는 선택된 기사에게 결제 후에만 공개한다. |
 | `assembly_request_items` | 요청 시점 부품명·수량·가격·구매처 snapshot | 요청 생성 후 수정하지 않는다. 원본 `parts` 가격 변경과 무관하다. |
-| `assembly_offers` | 내부/외부 기사별 부품 확인가·조립비·배송비·일정과 제출자 | `AVAILABLE/SELECTED/WITHDRAWN/EXPIRED`, 요청별 SELECTED partial unique, 외부 기사당 요청별 1건 |
+| `assembly_offers` | 내부/외부 기사별 부품 확인가·조립비·배송비·일정·무상 보증 기간·사용자용 제안 메시지와 제출자 | `AVAILABLE/SELECTED/WITHDRAWN/EXPIRED`, 요청별 SELECTED partial unique, 외부 기사당 요청별 1건. `warranty_days`는 0~365, `proposal_message`는 nullable 500자이며 `admin_note`와 분리한다. |
 | `assembly_payments` | 실제 PG 없는 가상 결제 상태 | 요청별 1건, `PENDING/PAID/CANCELLED/REFUNDED`, 카드·계좌 정보 없음 |
 | `assembly_request_status_history` | 사용자/관리자 상태 전이 타임라인 | actor와 before/after 상태, 메모를 append-only로 저장 |
 | `assembly_offer_activities` | 외부 기사와 관리자의 제안 제출·수정·철회 이력 | actor, action, 당시 제안 snapshot을 append-only로 저장 |
@@ -2749,6 +2749,8 @@ V108__visit_support_reservations_exact_time.sql
 - EXTERNAL 기사는 기존 USER와 `technicians.user_id`로 1:1 연결한다. 승인된 기사만 요청함을 조회하고 요청별 외부 AVAILABLE 제안 최대 3건 안에서 직접 입찰한다.
 - 승인 후 정지된 외부 기사는 신규 입찰 자격만 잃는다. 이미 선택된 제안과 낙찰 작업은 보존하며 해당 작업 조회는 계속 허용한다.
 - 외부 기사 제안은 생성·수정·철회마다 `assembly_offer_activities`에 snapshot을 남긴다. 철회 후 같은 요청에 다시 입찰할 수 없다.
+- 기존 제안은 V134 적용 시 `warranty_days=0`, `proposal_message=NULL`이다. 신규 activity snapshot은 `warrantyDays`와 `message`를 포함하고 철회 사유는 `withdrawalReason`으로 별도 기록하며 과거 row는 backfill하지 않는다.
+- `proposal_message`는 요청 사용자에게 노출하는 기사 제안이고 `admin_note`는 관리자·운영 메모 및 기존 호환 데이터다. 제안 메시지 생성·수정·철회는 `admin_note`를 대체하지 않는다.
 - `assembly_requests.contact_name/contact_phone/postal_code/address_*`와 자유 메모는 일반 입찰 후보에게 반환하지 않는다. 본인 제안이 `SELECTED`이고 가상 결제가 `PAID`인 기사에게만 API가 공개한다.
 - 기사 soft delete는 과거 제안의 FK와 `technician_snapshot`을 보존하며 이후 자동 제안에서만 제외한다.
 - `assembly_requests.selected_offer_id`와 요청별 SELECTED partial unique index를 함께 사용해 동시 선택을 막는다.

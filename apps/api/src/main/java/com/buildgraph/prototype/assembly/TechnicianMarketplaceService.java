@@ -156,7 +156,7 @@ public class TechnicianMarketplaceService {
     @Transactional
     public Map<String, Object> createOffer(String authorization, String requestPublicId, Map<String, Object> body) {
         CurrentUserService.CurrentUser user = requireRegularUser(authorization);
-        Map<String, Object> technician = requireBidEligibleTechnician(user.internalId());
+        Map<String, Object> technician = requireBidEligibleTechnicianForUpdate(user.internalId());
         Map<String, Object> request = lockOpenRequest(requestPublicId, technician, user.internalId());
         Long requestId = longValue(request, "id");
         Long technicianId = longValue(technician, "id");
@@ -172,20 +172,20 @@ public class TechnicianMarketplaceService {
         if (externalCount != null && externalCount >= MAX_EXTERNAL_OFFERS) {
             throw conflict("외부 기사 제안이 마감되었습니다.");
         }
-        OfferInput input = offerInput(body, null);
+        OfferInput input = offerInput(body, null, request);
         String offerId = jdbcTemplate.queryForObject("""
                 INSERT INTO assembly_offers (
                     assembly_request_id, technician_id, status, technician_snapshot,
                     confirmed_parts_price, assembly_fee, delivery_fee, final_price,
-                    lead_time_days, stock_status, admin_note, submitted_by_user_id,
+                    lead_time_days, stock_status, warranty_days, proposal_message, submitted_by_user_id,
                     submitted_at, created_at, updated_at
-                ) VALUES (?, ?, 'AVAILABLE', ?::jsonb, ?, ?, ?, ?, ?, ?, ?, ?, now(), now(), now())
+                ) VALUES (?, ?, 'AVAILABLE', ?::jsonb, ?, ?, ?, ?, ?, ?, ?, ?, ?, now(), now(), now())
                 RETURNING public_id::text
                 """, String.class, requestId, technicianId, toJson(technicianSnapshot(technician)),
                 input.confirmedPartsPrice(), input.assemblyFee(), input.deliveryFee(), input.finalPrice(),
-                input.leadTimeDays(), input.stockStatus(), input.note(), user.internalId());
+                input.leadTimeDays(), input.stockStatus(), input.warrantyDays(), input.message(), user.internalId());
         Map<String, Object> offer = ownOfferByPublicId(offerId, technicianId, true);
-        addOfferActivity(longValue(offer, "id"), user.internalId(), "SUBMITTED", offer);
+        addOfferActivity(longValue(offer, "id"), user.internalId(), "SUBMITTED", offer, null);
         if ("REQUESTED".equals(DbValueMapper.string(request, "status"))) {
             jdbcTemplate.update("UPDATE assembly_requests SET status = 'OFFERED', updated_at = now() WHERE id = ?", requestId);
             addRequestHistory(requestId, user.internalId(), "REQUESTED", "OFFERED", "외부 기사 제안 도착");
@@ -197,21 +197,24 @@ public class TechnicianMarketplaceService {
     public Map<String, Object> updateOffer(String authorization, String offerPublicId, Map<String, Object> body) {
         CurrentUserService.CurrentUser user = requireRegularUser(authorization);
         Map<String, Object> technician = requireBidEligibleTechnician(user.internalId());
-        Map<String, Object> offer = ownOfferByPublicId(offerPublicId, longValue(technician, "id"), true);
-        if (!"AVAILABLE".equals(DbValueMapper.string(offer, "status"))) throw conflict("수정할 수 없는 제안입니다.");
-        Map<String, Object> request = requestRowForUpdate(longValue(offer, "assembly_request_id"));
+        Long technicianId = longValue(technician, "id");
+        Long requestId = ownOfferRequestId(offerPublicId, technicianId);
+        Map<String, Object> request = requestRowForUpdate(requestId);
+        Map<String, Object> offer = ownOfferForUpdate(offerPublicId, technicianId, requestId);
         if (!Set.of("REQUESTED", "OFFERED").contains(DbValueMapper.string(request, "status"))) {
             throw conflict("마감된 요청의 제안은 수정할 수 없습니다.");
         }
-        OfferInput input = offerInput(body, offer);
+        if (!"AVAILABLE".equals(DbValueMapper.string(offer, "status"))) throw conflict("수정할 수 없는 제안입니다.");
+        OfferInput input = offerInput(body, offer, request);
         jdbcTemplate.update("""
                 UPDATE assembly_offers SET confirmed_parts_price = ?, assembly_fee = ?, delivery_fee = ?,
-                    final_price = ?, lead_time_days = ?, stock_status = ?, admin_note = ?, updated_at = now()
+                    final_price = ?, lead_time_days = ?, stock_status = ?, warranty_days = ?,
+                    proposal_message = ?, updated_at = now()
                 WHERE id = ?
                 """, input.confirmedPartsPrice(), input.assemblyFee(), input.deliveryFee(), input.finalPrice(),
-                input.leadTimeDays(), input.stockStatus(), input.note(), longValue(offer, "id"));
+                input.leadTimeDays(), input.stockStatus(), input.warrantyDays(), input.message(), longValue(offer, "id"));
         Map<String, Object> updated = ownOfferByPublicId(offerPublicId, longValue(technician, "id"), true);
-        addOfferActivity(longValue(updated, "id"), user.internalId(), "UPDATED", updated);
+        addOfferActivity(longValue(updated, "id"), user.internalId(), "UPDATED", updated, null);
         return offerMap(updated);
     }
 
@@ -219,19 +222,21 @@ public class TechnicianMarketplaceService {
     public Map<String, Object> withdrawOffer(String authorization, String offerPublicId, Map<String, Object> body) {
         CurrentUserService.CurrentUser user = requireRegularUser(authorization);
         Map<String, Object> technician = requireBidEligibleTechnician(user.internalId());
-        Map<String, Object> offer = ownOfferByPublicId(offerPublicId, longValue(technician, "id"), true);
-        if (!"AVAILABLE".equals(DbValueMapper.string(offer, "status"))) throw conflict("철회할 수 없는 제안입니다.");
-        Map<String, Object> request = requestRowForUpdate(longValue(offer, "assembly_request_id"));
+        Long technicianId = longValue(technician, "id");
+        Long requestId = ownOfferRequestId(offerPublicId, technicianId);
+        Map<String, Object> request = requestRowForUpdate(requestId);
+        Map<String, Object> offer = ownOfferForUpdate(offerPublicId, technicianId, requestId);
         if (!Set.of("REQUESTED", "OFFERED").contains(DbValueMapper.string(request, "status"))) {
             throw conflict("마감된 요청의 제안은 철회할 수 없습니다.");
         }
+        if (!"AVAILABLE".equals(DbValueMapper.string(offer, "status"))) throw conflict("철회할 수 없는 제안입니다.");
         String reason = required(body.get("reason"), 1000, "철회 사유가 필요합니다.");
         jdbcTemplate.update("""
                 UPDATE assembly_offers SET status = 'WITHDRAWN', admin_note = ?, withdrawn_at = now(), updated_at = now()
                 WHERE id = ?
                 """, reason, longValue(offer, "id"));
         Map<String, Object> updated = ownOfferByPublicId(offerPublicId, longValue(technician, "id"), true);
-        addOfferActivity(longValue(updated, "id"), user.internalId(), "WITHDRAWN", updated);
+        addOfferActivity(longValue(updated, "id"), user.internalId(), "WITHDRAWN", updated, reason);
         Integer remaining = jdbcTemplate.queryForObject(
                 "SELECT count(*) FROM assembly_offers WHERE assembly_request_id = ? AND status = 'AVAILABLE'",
                 Integer.class, longValue(request, "id"));
@@ -407,7 +412,9 @@ public class TechnicianMarketplaceService {
                 "finalPrice", longValue(row, "final_price"),
                 "leadTimeDays", DbValueMapper.integer(row, "lead_time_days"),
                 "stockStatus", DbValueMapper.string(row, "stock_status"),
-                "note", DbValueMapper.string(row, "admin_note"),
+                "warrantyDays", warrantyDays(row),
+                "message", DbValueMapper.string(row, "proposal_message"),
+                "note", DbValueMapper.string(row, "proposal_message"),
                 "submittedAt", DbValueMapper.timestamp(row, "submitted_at"),
                 "updatedAt", DbValueMapper.timestamp(row, "updated_at")
         );
@@ -465,20 +472,34 @@ public class TechnicianMarketplaceService {
                 regions, serviceTypes, specialties, assemblyFee, deliveryFee, leadTime, asAccepted);
     }
 
-    private OfferInput offerInput(Map<String, Object> body, Map<String, Object> existing) {
-        long partsPrice = nonnegative(body.get("confirmedPartsPrice"), existing == null ? 0 : longValue(existing, "confirmed_parts_price"), "부품 확인가");
+    private OfferInput offerInput(Map<String, Object> body, Map<String, Object> existing, Map<String, Object> request) {
         long assemblyFee = nonnegative(body.get("assemblyFee"), existing == null ? 0 : longValue(existing, "assembly_fee"), "조립비");
-        long deliveryFee = nonnegative(body.get("deliveryFee"), existing == null ? 0 : longValue(existing, "delivery_fee"), "배송비");
+        AssemblyOfferPricePolicy.PriceResult price = AssemblyOfferPricePolicy.calculate(
+                DbValueMapper.string(request, "service_type"),
+                longValue(request, "estimated_parts_price"),
+                assemblyFee
+        );
         int leadTime = (int) positive(body.get("leadTimeDays"), existing == null ? 1 : longValue(existing, "lead_time_days"), "예상 소요일");
         String stockStatus = body.containsKey("stockStatus")
                 ? required(body.get("stockStatus"), 255, "재고 확인 문구가 필요합니다.")
                 : required(existing == null ? null : existing.get("stock_status"), 255, "재고 확인 문구가 필요합니다.");
-        String note = body.containsKey("note") ? optional(body.get("note"), 1000) : existing == null ? null : DbValueMapper.string(existing, "admin_note");
-        return new OfferInput(partsPrice, assemblyFee, deliveryFee, partsPrice + assemblyFee + deliveryFee, leadTime, stockStatus, note);
+        int warrantyDays = body.containsKey("warrantyDays")
+                ? warrantyDays(body.get("warrantyDays"))
+                : existing == null ? 0 : warrantyDays(existing);
+        String message = body.containsKey("message")
+                ? optional(body.get("message"), 500)
+                : body.containsKey("note")
+                        ? optional(body.get("note"), 500)
+                        : existing == null ? null : DbValueMapper.string(existing, "proposal_message");
+        return new OfferInput(price.confirmedPartsPrice(), price.assemblyFee(), price.deliveryFee(), price.finalPrice(),
+                leadTime, stockStatus, warrantyDays, message);
     }
 
     private Map<String, Object> requireApprovedExternalTechnician(Long userId) {
-        Map<String, Object> technician = technicianByUser(userId);
+        return requireApprovedExternalTechnician(technicianByUser(userId));
+    }
+
+    private Map<String, Object> requireApprovedExternalTechnician(Map<String, Object> technician) {
         if (technician == null
                 || !"EXTERNAL".equals(DbValueMapper.string(technician, "provider_type"))
                 || !"APPROVED".equals(DbValueMapper.string(technician, "verification_status"))) {
@@ -497,6 +518,15 @@ public class TechnicianMarketplaceService {
 
     private Map<String, Object> requireBidEligibleTechnician(Long userId) {
         Map<String, Object> technician = requireApprovedExternalTechnician(userId);
+        return requireBidEligibleTechnician(technician);
+    }
+
+    private Map<String, Object> requireBidEligibleTechnicianForUpdate(Long userId) {
+        Map<String, Object> technician = requireApprovedExternalTechnician(technicianByUser(userId, true));
+        return requireBidEligibleTechnician(technician);
+    }
+
+    private Map<String, Object> requireBidEligibleTechnician(Map<String, Object> technician) {
         if (!isBidEligible(technician)) {
             throw new ApiException(HttpStatus.FORBIDDEN, "FORBIDDEN", "활동 중이며 표준 AS에 동의한 기사만 입찰할 수 있습니다.");
         }
@@ -509,10 +539,15 @@ public class TechnicianMarketplaceService {
     }
 
     private Map<String, Object> technicianByUser(Long userId) {
+        return technicianByUser(userId, false);
+    }
+
+    private Map<String, Object> technicianByUser(Long userId, boolean lock) {
+        String suffix = lock ? " FOR UPDATE" : "";
         return jdbcTemplate.queryForList("""
                 SELECT *, public_id::text AS public_id FROM technicians
                 WHERE user_id = ? AND deleted_at IS NULL
-                """, userId).stream().findFirst().orElse(null);
+                """ + suffix, userId).stream().findFirst().orElse(null);
     }
 
     private Map<String, Object> ownOffer(Long requestId, Long technicianId) {
@@ -528,6 +563,27 @@ public class TechnicianMarketplaceService {
                 SELECT *, id AS internal_id, public_id::text AS public_id_text
                 FROM assembly_offers WHERE public_id = ?::uuid AND technician_id = ?
                 """ + suffix, publicId, technicianId).stream().findFirst().orElseThrow(TechnicianMarketplaceService::notFound);
+    }
+
+    private Long ownOfferRequestId(String publicId, Long technicianId) {
+        return jdbcTemplate.queryForList("""
+                SELECT assembly_request_id FROM assembly_offers
+                WHERE public_id = ?::uuid AND technician_id = ?
+                """, publicId, technicianId).stream()
+                .findFirst()
+                .map(row -> longValue(row, "assembly_request_id"))
+                .orElseThrow(TechnicianMarketplaceService::notFound);
+    }
+
+    private Map<String, Object> ownOfferForUpdate(String publicId, Long technicianId, Long requestId) {
+        return jdbcTemplate.queryForList("""
+                SELECT *, id AS internal_id, public_id::text AS public_id_text
+                FROM assembly_offers
+                WHERE public_id = ?::uuid AND technician_id = ? AND assembly_request_id = ?
+                FOR UPDATE
+                """, publicId, technicianId, requestId).stream()
+                .findFirst()
+                .orElseThrow(TechnicianMarketplaceService::notFound);
     }
 
     private Map<String, Object> requestRow(Long requestId) {
@@ -549,11 +605,21 @@ public class TechnicianMarketplaceService {
                 .stream().findFirst().orElse(null);
     }
 
-    private void addOfferActivity(Long offerId, Long actorId, String action, Map<String, Object> snapshot) {
+    private void addOfferActivity(
+            Long offerId,
+            Long actorId,
+            String action,
+            Map<String, Object> snapshot,
+            String withdrawalReason
+    ) {
+        Map<String, Object> activitySnapshot = new LinkedHashMap<>(offerMap(snapshot));
+        if (withdrawalReason != null) {
+            activitySnapshot.put("withdrawalReason", withdrawalReason);
+        }
         jdbcTemplate.update("""
                 INSERT INTO assembly_offer_activities (assembly_offer_id, actor_user_id, action, snapshot, created_at)
                 VALUES (?, ?, ?, ?::jsonb, now())
-                """, offerId, actorId, action, toJson(offerMap(snapshot)));
+                """, offerId, actorId, action, toJson(activitySnapshot));
     }
 
     private void addRequestHistory(Long requestId, Long actorId, String from, String to, String note) {
@@ -659,6 +725,23 @@ public class TechnicianMarketplaceService {
         }
     }
 
+    private static int warrantyDays(Object value) {
+        if (value == null) throw validation("무상 보증 기간이 필요합니다.");
+        if (!(value instanceof Byte || value instanceof Short || value instanceof Integer || value instanceof Long)) {
+            throw validation("무상 보증 기간 형식이 올바르지 않습니다.");
+        }
+        long result = ((Number) value).longValue();
+        if (result < 0 || result > 365) {
+            throw validation("무상 보증 기간은 0~365일 범위여야 합니다.");
+        }
+        return (int) result;
+    }
+
+    private static int warrantyDays(Map<String, Object> row) {
+        Integer value = DbValueMapper.integer(row, "warranty_days");
+        return value == null ? 0 : value;
+    }
+
     private static int page(Integer value) {
         if (value == null) return 0;
         if (value < 0) throw validation("page는 0 이상이어야 합니다.");
@@ -725,6 +808,7 @@ public class TechnicianMarketplaceService {
             long finalPrice,
             int leadTimeDays,
             String stockStatus,
-            String note
+            int warrantyDays,
+            String message
     ) {}
 }

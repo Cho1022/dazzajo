@@ -4644,7 +4644,7 @@ test('loads more candidates in 20 item pages from the panel', async ({ page }) =
   await expect(panel.getByText('페이징 파워 1', { exact: true })).toBeVisible();
   expect(requestedPages).toContain('0');
 
-  await panel.getByRole('button', { name: '후보 더 보기' }).click();
+  await panel.getByRole('button', { name: '후보 더 보기' }).dispatchEvent('click');
   await expect(panel.getByText('페이징 파워 21', { exact: true })).toBeVisible();
   expect(requestedPages).toContain('1');
 });
@@ -5770,9 +5770,13 @@ test('shows save failure feedback while keeping the current self quote', async (
 test('persists an assembly request, selects an offer, and pays points after Toss authentication', async ({ page }) => {
   const quoteDraftMethods: string[] = [];
   const requestId = '00000000-0000-4000-8000-000000020001';
+  const longMessage = '플랫폼 제안 메시지 '.repeat(40).slice(0, 500);
   let requestStatus = 'OFFERED';
   let selectedOfferId: string | null = null;
   let paymentStatus: string | null = null;
+  let selectRequestCount = 0;
+  let selectPostData: string | null = null;
+  let detailRequestCount = 0;
   const assemblyResponse = () => ({
     id: requestId,
     requestNo: 'ASM-20990720-TEST0001',
@@ -5789,9 +5793,9 @@ test('persists an assembly request, selects an offer, and pays points after Toss
     canCancel: true,
     items: checkoutDraft.items.map((item) => ({ partId: item.partId, category: item.category, name: item.name, manufacturer: item.manufacturer, quantity: item.quantity, unitPrice: item.currentPrice, lineTotal: item.lineTotal, externalOffer: item.externalOffer })),
     offers: [
-      { id: 'offer-balanced', technicianId: 'tech-1', technicianName: '박준호 기사', initials: '박', rating: 4.9, completedJobs: 184, responseMinutes: 12, specialties: ['고성능 게이밍 PC'], standardAsAccepted: true, providerType: 'INTERNAL', verified: true, status: selectedOfferId === 'offer-balanced' ? 'SELECTED' : selectedOfferId ? 'EXPIRED' : 'AVAILABLE', confirmedPartsPrice: 1_405_000, assemblyFee: 65_000, deliveryFee: 0, finalPrice: 1_470_000, leadTimeDays: 2, stockStatus: '주요 부품 재고 확인' },
-      { id: 'offer-fast', technicianId: 'tech-2', technicianName: '김도윤 기사', initials: '김', rating: 4.8, completedJobs: 132, responseMinutes: 8, specialties: ['당일 조립'], standardAsAccepted: true, providerType: 'INTERNAL', verified: true, status: selectedOfferId ? 'EXPIRED' : 'AVAILABLE', confirmedPartsPrice: 1_415_000, assemblyFee: 80_000, deliveryFee: 15_000, finalPrice: 1_510_000, leadTimeDays: 1, stockStatus: '주요 부품 재고 확인' },
-      { id: 'offer-silent', technicianId: 'tech-3', technicianName: '최민석 기사', initials: '최', rating: 5, completedJobs: 96, responseMinutes: 18, specialties: ['저소음'], standardAsAccepted: true, providerType: 'EXTERNAL', verified: true, status: selectedOfferId ? 'EXPIRED' : 'AVAILABLE', confirmedPartsPrice: 1_388_000, assemblyFee: 95_000, deliveryFee: 20_000, finalPrice: 1_503_000, leadTimeDays: 3, stockStatus: '주요 부품 재고 확인' }
+      { id: 'offer-balanced', technicianId: 'tech-1', technicianName: '박준호 기사', initials: '박', rating: 4.9, completedJobs: 184, responseMinutes: 12, specialties: ['고성능 게이밍 PC'], standardAsAccepted: true, providerType: 'INTERNAL', verified: true, status: selectedOfferId === 'offer-balanced' ? 'SELECTED' : selectedOfferId ? 'EXPIRED' : 'AVAILABLE', confirmedPartsPrice: 1_400_000, assemblyFee: 65_000, deliveryFee: 99_000, finalPrice: 1_470_000, leadTimeDays: 2, stockStatus: '주요 부품 재고 확인', warrantyDays: 0, message: longMessage, note: null },
+      { id: 'offer-fast', technicianId: 'tech-2', technicianName: '김도윤 기사', initials: '김', rating: 4.8, completedJobs: 132, responseMinutes: 8, specialties: ['당일 조립'], standardAsAccepted: true, providerType: 'INTERNAL', verified: true, status: selectedOfferId ? 'EXPIRED' : 'AVAILABLE', confirmedPartsPrice: 1_400_000, assemblyFee: 80_000, deliveryFee: 15_000, finalPrice: 1_480_000, leadTimeDays: 1, stockStatus: '주요 부품 재고 확인', warrantyDays: 365, message: null, note: '플랫폼 호환 메시지' },
+      { id: 'offer-silent', technicianId: 'tech-3', technicianName: '최민석 기사', initials: '최', rating: 5, completedJobs: 96, responseMinutes: 18, specialties: ['저소음'], standardAsAccepted: true, providerType: 'EXTERNAL', verified: true, status: selectedOfferId ? 'EXPIRED' : 'AVAILABLE', confirmedPartsPrice: 1_400_000, assemblyFee: 95_000, deliveryFee: 20_000, finalPrice: 1_495_000, leadTimeDays: 3, stockStatus: '주요 부품 재고 확인', warrantyDays: 30, message: '정식 사용자 공개 메시지\n선 정리까지 포함합니다.', note: 'LEGACY_MESSAGE_SHOULD_NOT_RENDER', adminNote: 'ADMIN_SECRET_RFQ_4B1' }
     ],
     payment: paymentStatus ? {
       id: 'payment-1',
@@ -5833,11 +5837,17 @@ test('persists an assembly request, selects an offer, and pays points after Toss
   await page.route('**/api/assembly-requests**', async (route) => {
     const url = route.request().url();
     const method = route.request().method();
+    if (method === 'GET' && url.endsWith(`/api/assembly-requests/${requestId}`)) {
+      detailRequestCount += 1;
+    }
     if (method === 'POST' && url.endsWith('/api/assembly-requests')) {
       await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(assemblyResponse()) });
       return;
     }
     if (method === 'POST' && url.endsWith('/offers/offer-balanced/select')) {
+      selectRequestCount += 1;
+      selectPostData = route.request().postData();
+      await new Promise((resolve) => setTimeout(resolve, 250));
       selectedOfferId = 'offer-balanced';
       requestStatus = 'MATCHED';
       paymentStatus = 'PENDING';
@@ -5893,23 +5903,48 @@ test('persists an assembly request, selects an offer, and pays points after Toss
 
   await expect(page).toHaveURL(`/checkout/offers/${requestId}`);
   await expect(page.getByRole('heading', { name: '기사 제안 3건' })).toBeVisible();
-  await expect(page.getByText('박준호 기사')).toBeVisible();
-  await expect(page.getByText('김도윤 기사')).toBeVisible();
-  await expect(page.getByText('최민석 기사')).toBeVisible();
-  await expect(page.getByText('Dazzajo 기사 2/2')).toBeVisible();
-  await expect(page.getByText('외부 파트너 1/3')).toBeVisible();
+  const registeredSection = page.getByTestId('external-offer-section');
+  const platformSection = page.getByTestId('internal-offer-section');
+  await expect(registeredSection.getByRole('heading', { name: '등록 기사 제안' })).toBeVisible();
+  await expect(platformSection.getByRole('heading', { name: '플랫폼 즉시 제안', level: 2 })).toBeVisible();
+  await expect(registeredSection.locator('article')).toHaveCount(1);
+  await expect(platformSection.locator('article')).toHaveCount(2);
+  await expect(registeredSection).toContainText('최민석 기사');
+  await expect(registeredSection).not.toContainText('플랫폼 자동 제안');
+  await expect(platformSection).not.toContainText('최민석 기사');
+  await expect(platformSection).toContainText('플랫폼 자동 제안');
+  await expect(registeredSection).toContainText('30일 보증');
+  await expect(platformSection).toContainText('보증 없음');
+  await expect(platformSection).toContainText('365일 보증');
+  await expect(registeredSection).toContainText('정식 사용자 공개 메시지');
+  await expect(registeredSection).not.toContainText('LEGACY_MESSAGE_SHOULD_NOT_RENDER');
+  await expect(page.getByText('ADMIN_SECRET_RFQ_4B1')).toHaveCount(0);
+  await expect(platformSection).toContainText(longMessage);
+  await expect(page.getByText('99,000원')).toHaveCount(0);
 
-  const balancedOffer = page.locator('article').filter({ hasText: '박준호 기사' });
-  await balancedOffer.getByRole('button', { name: '이 기사 선택' }).click();
+  const balancedOffer = platformSection.locator('article').filter({ hasText: '1,470,000원' });
+  await balancedOffer.getByRole('button', { name: '이 제안 선택' }).click();
   await expect(balancedOffer.getByRole('button', { name: '선택됨' })).toBeVisible();
   const selectedSummary = page.locator('aside').filter({ hasText: '선택 제안' });
-  await expect(selectedSummary.getByText('배송비')).toBeVisible();
-  await expect(selectedSummary.getByText('무료')).toBeVisible();
+  await expect(selectedSummary.getByText('배송 조건')).toBeVisible();
+  await expect(selectedSummary.getByText('작업 확정 후 별도 안내')).toBeVisible();
   await page.getByRole('button', { name: '선택한 제안 승인' }).click();
+  await expect(balancedOffer.getByRole('button', { name: '선택 중...' })).toBeVisible();
+  await expect(platformSection.getByRole('button', { name: '이 제안 선택' })).toBeDisabled();
   await expect(page).toHaveURL(`/checkout/payment/${requestId}`);
+  expect(selectRequestCount).toBe(1);
+  expect(selectPostData).toBeNull();
+  expect(detailRequestCount).toBeGreaterThanOrEqual(1);
   await page.reload();
-  await expect(page.getByText('박준호 기사')).toBeVisible();
+  await expect(page.getByText('플랫폼 즉시 제안')).toBeVisible();
   await expect(page.getByRole('button', { name: '결제하기', exact: true })).toBeVisible();
+  await expect(page.getByText('부품 스냅샷 금액')).toBeVisible();
+  await expect(page.getByText('1,400,000원')).toBeVisible();
+  await expect(page.getByText('조립 공임')).toBeVisible();
+  await expect(page.getByText('65,000원')).toBeVisible();
+  await expect(page.getByText('배송 조건은 작업 확정 후 별도로 안내됩니다.')).toBeVisible();
+  await expect(page.getByText('99,000원')).toHaveCount(0);
+  await expect(page.getByText('1,470,000원')).toBeVisible();
   await page.goto(`/checkout/toss/success/${requestId}?paymentType=NORMAL&paymentKey=test_payment_key&orderId=${requestId}&amount=1470000`);
 
   await expect(page).toHaveURL(`/checkout/complete/${requestId}`);
@@ -5917,7 +5952,153 @@ test('persists an assembly request, selects an offer, and pays points after Toss
   await expect(page.getByText('ASM-20990720-TEST0001')).toBeVisible();
   await expect(page.getByText('1,470,000원')).toBeVisible();
   await expect(page.getByText('Dazzajo 표준 AS 적용')).toBeVisible();
+  await expect(page.getByText('보증 기간')).toBeVisible();
+  await expect(page.getByText('보증 없음')).toBeVisible();
   expect(quoteDraftMethods.every((method) => method === 'GET')).toBe(true);
+});
+
+test('refreshes stale offer state and shows a toast when selection conflicts', async ({ page }) => {
+  const requestId = '00000000-0000-4000-8000-000000020021';
+  let latestState = false;
+  let detailRequestCount = 0;
+  const offer = {
+    id: 'offer-conflict',
+    technicianId: 'tech-conflict',
+    technicianName: '경합 확인 기사',
+    initials: '경',
+    rating: 4.8,
+    completedJobs: 48,
+    responseMinutes: 12,
+    specialties: ['게이밍 PC'],
+    standardAsAccepted: true,
+    providerType: 'EXTERNAL',
+    verified: true,
+    status: latestState ? 'SELECTED' : 'AVAILABLE',
+    confirmedPartsPrice: 1_400_000,
+    assemblyFee: 70_000,
+    deliveryFee: 30_000,
+    finalPrice: 1_470_000,
+    leadTimeDays: 2,
+    stockStatus: '재고 확인 완료',
+    warrantyDays: 30,
+    message: '경합 테스트 제안',
+    note: null
+  };
+  const response = () => ({
+    id: requestId,
+    requestNo: 'ASM-RFQ-CONFLICT',
+    status: latestState ? 'MATCHED' : 'OFFERED',
+    serviceType: 'FULL_SERVICE',
+    region: '서울',
+    preferredDate: '2099-07-20',
+    deliveryMethod: 'DELIVERY',
+    note: '',
+    asPolicyAccepted: true,
+    estimatedPartsPrice: 1_400_000,
+    itemCount: 2,
+    selectedOfferId: latestState ? offer.id : null,
+    canCancel: !latestState,
+    items: [],
+    offers: [{ ...offer, status: latestState ? 'SELECTED' : 'AVAILABLE' }],
+    payment: latestState ? { id: 'payment-conflict', amount: 1_470_000, paidAmount: 0, currency: 'KRW', provider: 'LEGACY_VIRTUAL', method: 'VIRTUAL', status: 'PENDING' } : null,
+    statusHistory: []
+  });
+
+  await loginAsUser(page);
+  await page.route('**/api/assembly-requests**', async (route) => {
+    const method = route.request().method();
+    const url = route.request().url();
+    if (method === 'POST' && url.endsWith(`/offers/${offer.id}/select`)) {
+      latestState = true;
+      await route.fulfill({
+        status: 409,
+        contentType: 'application/json',
+        body: JSON.stringify({ code: 'CONFLICT_STATE', message: '이미 다른 변경이 반영됨' })
+      });
+      return;
+    }
+    if (method === 'GET' && url.endsWith(`/api/assembly-requests/${requestId}`)) {
+      detailRequestCount += 1;
+    }
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(response()) });
+  });
+
+  await page.goto(`/checkout/offers/${requestId}`);
+  await page.getByTestId('external-offer-section').getByRole('button', { name: '이 기사 선택' }).click();
+  await page.getByRole('button', { name: '선택한 제안 승인' }).click();
+
+  await expect(page.getByTestId('mutation-toast')).toContainText('다른 변경이 먼저 반영되었습니다. 최신 제안 상태를 다시 불러왔습니다.');
+  await expect(page).toHaveURL(`/checkout/offers/${requestId}`);
+  await expect.poll(() => detailRequestCount).toBeGreaterThanOrEqual(2);
+  await expect(page.getByRole('link', { name: '결제 상태 확인' })).toBeVisible();
+  await expect(page.getByTestId('external-offer-section').getByRole('button', { name: '선택됨' })).toBeDisabled();
+});
+
+test('uses only the server payment amount for an assembly-only request', async ({ page }) => {
+  const requestId = '00000000-0000-4000-8000-000000020022';
+  const offer = {
+    id: 'offer-assembly-only',
+    technicianId: 'tech-assembly-only',
+    technicianName: '조립 전용 기사',
+    initials: '조',
+    rating: 4.9,
+    completedJobs: 77,
+    responseMinutes: 9,
+    specialties: ['조립 전용'],
+    standardAsAccepted: true,
+    providerType: 'EXTERNAL',
+    verified: true,
+    status: 'SELECTED',
+    confirmedPartsPrice: 0,
+    assemblyFee: 70_000,
+    deliveryFee: 20_000,
+    finalPrice: 70_000,
+    leadTimeDays: 1,
+    stockStatus: '사용자 준비 부품 확인',
+    warrantyDays: 30,
+    message: '사용자 준비 부품을 조립합니다.',
+    note: null
+  };
+  const request = {
+    id: requestId,
+    requestNo: 'ASM-ASSEMBLY-ONLY',
+    status: 'MATCHED',
+    serviceType: 'ASSEMBLY_ONLY',
+    region: '서울',
+    preferredDate: '2099-07-21',
+    deliveryMethod: 'DELIVERY',
+    note: '',
+    asPolicyAccepted: true,
+    estimatedPartsPrice: 1_400_000,
+    itemCount: 2,
+    selectedOfferId: offer.id,
+    canCancel: false,
+    items: [],
+    offers: [offer],
+    payment: { id: 'payment-assembly-only', amount: 70_000, paidAmount: 0, currency: 'KRW', provider: 'LEGACY_VIRTUAL', method: 'VIRTUAL', status: 'PENDING' },
+    statusHistory: []
+  };
+
+  await loginAsUser(page);
+  await page.route('**/api/assembly-requests**', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(request) }));
+  await page.route('**/api/users/me/points', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ id: 'point-wallet-only', name: '포인트', balance: 1_000_000, pointValueWon: 1, currency: 'KRW' }) }));
+
+  await page.goto(`/checkout/offers/${requestId}`);
+  await expect(page.getByTestId('external-offer-section')).toContainText('사용자 준비');
+  await expect(page.getByTestId('external-offer-section')).toContainText('70,000원');
+  await expect(page.getByText('1,400,000원')).toHaveCount(0);
+  await expect(page.getByText('20,000원')).toHaveCount(0);
+
+  await page.getByRole('link', { name: '결제 상태 확인' }).click();
+  await expect(page).toHaveURL(`/checkout/payment/${requestId}`);
+  await expect(page.getByText('부품', { exact: true })).toBeVisible();
+  await expect(page.getByText('사용자 준비', { exact: true })).toBeVisible();
+  await expect(page.getByText('최종 결제 금액')).toBeVisible();
+  await expect(page.getByText('70,000원')).toHaveCount(2);
+  await expect(page.getByText('70,000원').first()).toBeVisible();
+  await expect(page.getByText('1,400,000원')).toHaveCount(0);
+  await expect(page.getByText('20,000원')).toHaveCount(0);
+  await expect(page.getByText('배송 조건은 작업 확정 후 별도로 안내됩니다.')).toBeVisible();
 });
 
 test('requires contact and delivery address fields before creating an assembly request', async ({ page }) => {
@@ -6038,6 +6219,158 @@ test('keeps the checkout request panel expanded while editing contact informatio
     return panel.checkoutHeightChanges ?? [];
   });
   expect(heightChanges).not.toContain('0px');
+});
+
+test('shows INTERNAL and EXTERNAL selected providers consistently in request history and detail', async ({ page }) => {
+  const internalRequestId = '00000000-0000-4000-8000-000000020013';
+  const externalRequestId = '00000000-0000-4000-8000-000000020014';
+  const internalTechnicianName = 'INTERNAL_FAKE_TECHNICIAN_RFQ_5B2A';
+  const externalTechnicianName = '외부 기사 테스트';
+  const selectedOffer = (
+    id: string,
+    providerType: 'INTERNAL' | 'EXTERNAL',
+    technicianName: string,
+    finalPrice: number
+  ) => ({
+    id,
+    technicianId: `${id}-technician`,
+    technicianName,
+    initials: technicianName.slice(0, 1),
+    rating: 4.9,
+    completedJobs: 184,
+    responseMinutes: 12,
+    specialties: ['안정성 검증'],
+    standardAsAccepted: true,
+    providerType,
+    verified: true,
+    status: 'SELECTED',
+    confirmedPartsPrice: 1_400_000,
+    assemblyFee: finalPrice - 1_400_000,
+    deliveryFee: 0,
+    finalPrice,
+    leadTimeDays: 2,
+    stockStatus: '재고 확인 완료',
+    warrantyDays: 90,
+    message: '선택 제안 메시지'
+  });
+  const requestDetail = (
+    id: string,
+    requestNo: string,
+    offer: ReturnType<typeof selectedOffer>
+  ) => ({
+    id,
+    requestNo,
+    status: 'MATCHED',
+    serviceType: 'FULL_SERVICE',
+    region: '서울',
+    preferredDate: '2099-07-20',
+    deliveryMethod: 'DELIVERY',
+    note: '',
+    contact: { name: 'Demo User', phone: null },
+    asPolicyAccepted: true,
+    estimatedPartsPrice: 1_400_000,
+    itemCount: 2,
+    selectedOfferId: offer.id,
+    canCancel: true,
+    items: [],
+    offers: [offer],
+    payment: {
+      id: `${id}-payment`,
+      amount: offer.finalPrice,
+      paidAmount: 0,
+      currency: 'KRW',
+      provider: 'LEGACY_VIRTUAL',
+      method: 'VIRTUAL',
+      status: 'PENDING'
+    },
+    statusHistory: [{ fromStatus: 'OFFERED', toStatus: 'MATCHED', note: '제안 선택' }]
+  });
+  const internalOffer = selectedOffer('offer-internal-history', 'INTERNAL', internalTechnicianName, 1_470_000);
+  const externalOffer = selectedOffer('offer-external-history', 'EXTERNAL', externalTechnicianName, 1_495_000);
+  const details = new Map([
+    [internalRequestId, requestDetail(internalRequestId, 'ASM-INTERNAL-HISTORY', internalOffer)],
+    [externalRequestId, requestDetail(externalRequestId, 'ASM-EXTERNAL-HISTORY', externalOffer)]
+  ]);
+
+  await page.addInitScript(() => localStorage.setItem('buildgraph.token', 'jwt-user-token'));
+  await page.route('**/api/assembly-requests**', async (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    const pathParts = pathname.split('/');
+    const requestId = pathParts[pathParts.length - 1];
+    const detail = requestId ? details.get(requestId) : undefined;
+    if (detail) {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(detail) });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        items: [
+          {
+            id: internalRequestId,
+            requestNo: 'ASM-INTERNAL-HISTORY',
+            status: 'MATCHED',
+            serviceType: 'FULL_SERVICE',
+            region: '서울',
+            preferredDate: '2099-07-20',
+            deliveryMethod: 'DELIVERY',
+            estimatedPartsPrice: 1_400_000,
+            itemCount: 2,
+            availableOfferCount: 0,
+            finalPrice: internalOffer.finalPrice,
+            technicianName: internalTechnicianName,
+            providerType: 'INTERNAL',
+            paymentStatus: 'PENDING'
+          },
+          {
+            id: externalRequestId,
+            requestNo: 'ASM-EXTERNAL-HISTORY',
+            status: 'MATCHED',
+            serviceType: 'FULL_SERVICE',
+            region: '서울',
+            preferredDate: '2099-07-20',
+            deliveryMethod: 'DELIVERY',
+            estimatedPartsPrice: 1_400_000,
+            itemCount: 2,
+            availableOfferCount: 0,
+            finalPrice: externalOffer.finalPrice,
+            technicianName: externalTechnicianName,
+            providerType: 'EXTERNAL',
+            paymentStatus: 'PENDING'
+          }
+        ],
+        page: 0,
+        size: 20,
+        total: 2
+      })
+    });
+  });
+
+  await page.goto('/my/assembly-requests');
+
+  const internalHistory = page.locator(`a[href="/my/assembly-requests/${internalRequestId}"]`);
+  const externalHistory = page.locator(`a[href="/my/assembly-requests/${externalRequestId}"]`);
+  await expect(internalHistory).toContainText('플랫폼 즉시 제안');
+  await expect(internalHistory).not.toContainText(internalTechnicianName);
+  await expect(internalHistory).toContainText('1,470,000원');
+  await expect(internalHistory).toContainText('결제 PENDING');
+  await expect(externalHistory).toContainText(externalTechnicianName);
+  await expect(externalHistory).not.toContainText('플랫폼 즉시 제안');
+  await expect(externalHistory).toContainText('1,495,000원');
+
+  await page.goto(`/my/assembly-requests/${internalRequestId}`);
+  await expect(page.getByRole('heading', { name: '조립 요청 진행 상태' })).toBeVisible();
+  await expect(page.getByText('플랫폼 즉시 제안', { exact: true })).toBeVisible();
+  await expect(page.getByText(internalTechnicianName)).toHaveCount(0);
+  await expect(page.getByText('1,470,000원')).toBeVisible();
+  await expect(page.getByText('PENDING')).toBeVisible();
+
+  await page.goto(`/my/assembly-requests/${externalRequestId}`);
+  await expect(page.getByRole('heading', { name: '조립 요청 진행 상태' })).toBeVisible();
+  await expect(page.getByText(externalTechnicianName, { exact: true })).toBeVisible();
+  await expect(page.getByText('플랫폼 즉시 제안', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('1,495,000원')).toBeVisible();
 });
 
 test('shows a newly arrived technician offer from the in-progress request without reload', async ({ page }) => {

@@ -68,7 +68,7 @@ export function CheckoutPaymentPage() {
         <div className="mt-4 grid gap-5 lg:grid-cols-[minmax(0,1fr)_340px]">
           <Panel title="포인트 결제 정보" subtitle="토스 결제창에서 금액을 확인하고 테스트 인증을 마치면 보유 포인트로 결제합니다.">
             <div className="space-y-4">
-              <InfoLine icon={<UserRoundCheck size={17} />} label="선택 기사" value={offer.technicianName} />
+              <InfoLine icon={<UserRoundCheck size={17} />} label="선택 제안" value={offer.providerType === 'EXTERNAL' ? offer.technicianName : '플랫폼 즉시 제안'} />
               <InfoLine icon={<CalendarDays size={17} />} label="완료 예상" value={`${offer.leadTimeDays}일`} />
               <InfoLine icon={<ShieldCheck size={17} />} label="AS 정책" value="표준 AS 적용" />
               <div className="rounded-md border border-[#f4c8b2] bg-[#fff5ef] p-4 text-sm font-bold leading-6 text-[#7a3215]">
@@ -90,10 +90,10 @@ export function CheckoutPaymentPage() {
             <div className="mt-4 border-t border-commerce-line pt-4 text-sm font-black text-slate-500">최종 결제 금액</div>
             <div className="mt-2 text-3xl font-black text-[#de6c2d]">{request.payment.amount.toLocaleString()}원</div>
             <div className="mt-5 space-y-3 border-t border-commerce-line pt-4">
-              <SummaryRow label="부품 확인가" value={`${offer.confirmedPartsPrice.toLocaleString()}원`} />
-              <SummaryRow label="조립비" value={`${offer.assemblyFee.toLocaleString()}원`} />
-              <SummaryRow label="배송비" value={offer.deliveryFee ? `${offer.deliveryFee.toLocaleString()}원` : '무료'} />
+              <SummaryRow label={request.serviceType === 'FULL_SERVICE' ? '부품 스냅샷 금액' : '부품'} value={request.serviceType === 'FULL_SERVICE' ? `${request.estimatedPartsPrice.toLocaleString()}원` : '사용자 준비'} />
+              <SummaryRow label="조립 공임" value={`${offer.assemblyFee.toLocaleString()}원`} />
             </div>
+            <p className="mt-4 rounded-md bg-slate-50 px-3 py-2 text-xs font-bold leading-5 text-slate-600">배송 조건은 작업 확정 후 별도로 안내됩니다.</p>
             {request.payment.status === 'PAID' ? (
               <Link to={`/checkout/complete/${request.id}`} className="mt-5 flex min-h-12 items-center justify-center rounded-md bg-emerald-600 px-4 text-sm font-black text-white">결제 완료 내역 보기</Link>
             ) : (

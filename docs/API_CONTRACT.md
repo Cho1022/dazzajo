@@ -386,8 +386,8 @@ Google OAuth 정책:
 | `GET` | `/api/technician-profile-images/{fileName}` | 공개 | 2번 | - | 캐시 가능한 이미지 바이너리 | 서버 파일 저장소 |
 | `GET` | `/api/technician/assembly-requests` | 승인 기사 USER | 2번 | `?scope=OPEN|SELECTED&page=0&size=20` | 익명 공개 요청 또는 낙찰 작업 목록 | `assembly_requests`, `assembly_offers`, `assembly_payments` |
 | `GET` | `/api/technician/assembly-requests/{id}` | 승인 기사 USER | 2번 | - | 익명 요청 상세. 본인 제안 선택 + 가상 결제 완료 후에만 연락처·주소·메모 포함 | 조립 중개 전체 table |
-| `POST` | `/api/technician/assembly-requests/{id}/offers` | 승인 기사 USER | 2번 | 부품 확인가, 조립비, 배송비, 소요일, 재고 문구, 메모 | 본인 `AVAILABLE` 제안을 포함한 익명 요청 | `assembly_offers`, `assembly_offer_activities` |
-| `PATCH` | `/api/technician/offers/{id}` | 제안 소유 기사 USER | 2번 | 가격·소요일·재고 문구 보정 | `AVAILABLE` 본인 제안 | `assembly_offers`, `assembly_offer_activities` |
+| `POST` | `/api/technician/assembly-requests/{id}/offers` | 승인 기사 USER | 2번 | 조립비, 소요일, 재고 문구, 선택 `warrantyDays(0~365)`, 선택 `message(500자)`. `confirmedPartsPrice`·`deliveryFee`는 호환상 받을 수 있지만 서버 가격 계산에서는 무시한다. `message` 키가 없을 때만 기존 `note`를 호환 입력으로 사용한다. | 본인 `AVAILABLE` 제안을 포함한 익명 요청 | `assembly_offers`, `assembly_offer_activities` |
+| `PATCH` | `/api/technician/offers/{id}` | 제안 소유 기사 USER | 2번 | 조립비·소요일·재고 문구와 `warrantyDays`·`message` 보정. 생략한 조립비와 신규 필드는 기존 값을 유지하며, `confirmedPartsPrice`·`deliveryFee` 입력은 가격 계산에서 무시한다. 명시적인 null/공백 `message`는 제안 메시지를 삭제한다. | `AVAILABLE` 본인 제안 | `assembly_offers`, `assembly_offer_activities` |
 | `POST` | `/api/technician/offers/{id}/withdraw` | 제안 소유 기사 USER | 2번 | `{ "reason":"일정 불가" }` | `WITHDRAWN` 본인 제안 | `assembly_offers`, `assembly_offer_activities` |
 | `GET/POST` | `/api/admin/technicians` | ADMIN | 2번 | `providerType`, `verificationStatus` 필터 또는 내부 기사 생성 | `TechnicianPage` / `TechnicianDto` | `technicians`, `admin_audit_logs` |
 | `POST` | `/api/admin/technicians/profile-image` | ADMIN | 2번 | `multipart/form-data` `{ file }`, JPG/PNG/WebP 최대 1MiB | 업로드된 `{ profileImageUrl, fileName, fileSize, contentType }` | 서버 파일 저장소 |
@@ -408,16 +408,22 @@ Google OAuth 정책:
 - `compatibility`, `power`, `size` Tool FAIL이나 graph FAIL이 있으면 아무 row도 만들지 않고 `409 CONFLICT_STATE`를 반환한다.
 - 같은 사용자와 `Idempotency-Key`는 하나의 요청만 만들며 fingerprint가 다르면 409다.
 - 신규 요청에는 ACTIVE, APPROVED, non-deleted, 표준 AS 동의, 지역·서비스 일치 `INTERNAL` 기사 제안을 최대 2건 자동 생성한다. 대상이 없으면 `REQUESTED`로 남긴다.
+- 신규·수정 제안 가격은 서버가 계산한다. `FULL_SERVICE`는 `confirmedPartsPrice=assembly_requests.estimated_parts_price`, `deliveryFee=0`, `finalPrice=confirmedPartsPrice+assemblyFee`이고, `ASSEMBLY_ONLY`는 `confirmedPartsPrice=0`, `deliveryFee=0`, `finalPrice=assemblyFee`다. 내부 자동 제안의 `parts_price_adjustment`와 기사 프로필 `delivery_fee`는 신규 payable 금액에 사용하지 않는다.
+- 사용자가 제안을 선택하면 같은 서버 가격 정책으로 선택 제안만 다시 정규화하고, 그 `finalPrice`를 `assembly_payments.amount`로 저장한다. 기존 AVAILABLE 제안을 일괄 재가격하거나 과거 SELECTED·결제 데이터를 변경하지 않는다.
 - `AssemblyOfferDto`는 기사 식별 정보로 `technicianName`, `initials`, nullable `profileImageUrl`을 제공한다. `profileImageUrl`은 HTTP(S) URL 또는 `/api/technician-profile-images/{fileName}` 형식의 업로드된 이미지 경로만 허용하며, 클라이언트는 사진이 없거나 로드에 실패하면 이니셜을 표시한다.
 - 업로드된 기사 프로필 이미지 파일은 `TECHNICIAN_PROFILE_IMAGE_STORAGE_PATH`에 저장하고 DB에는 이미지 URL 문자열만 저장한다. Docker Compose 배포에서는 named volume `technician-profile-image-data`가 이 경로를 보존한다.
 - 승인된 `EXTERNAL` 기사는 지역·서비스 방식이 맞고 외부 `AVAILABLE` 제안이 3건 미만인 요청에 직접 제안할 수 있다. 기사당 요청별 1건이며 철회 후 재입찰은 허용하지 않는다.
+- 외부 기사 제안의 `warrantyDays`는 `0~365`이며 생성 시 생략하면 0이다. 사용자용 `message`는 trim 후 최대 500자이고 `assembly_offers.proposal_message`에 저장한다. `message` 키가 있으면 비어 있더라도 canonical 입력이며, 키가 없을 때만 기존 `note`를 호환 입력으로 사용한다.
+- `proposal_message`는 요청 사용자에게 보여줄 기사 제안이고 `admin_note`는 관리자·운영 메모다. 두 값을 서로 대체하지 않으며, 기사 본인 응답의 기존 `note`는 `message`와 같은 값인 하위 호환 alias다.
 - 외부 기사 제안은 별도 관리자 승인을 거치지 않고 사용자 제안 비교 화면에 즉시 노출된다. 사용자가 하나를 선택하면 나머지 내부·외부 제안은 `EXPIRED`가 된다.
 - 사용자의 `/my/assembly-requests` 목록과 진행 상세는 열린 요청을 polling한다. `OFFERED` 상태에는 `/checkout/offers/{id}` 진입 동선을 제공해 화면을 나갔다 돌아와도 기사 제안을 비교·선택할 수 있다.
+- 사용자 조립 요청 목록의 선택 제안 summary는 nullable `providerType`(`INTERNAL`/`EXTERNAL`)과 snapshot `technicianName`을 함께 반환한다. 선택 제안이 없으면 두 값은 null이며, 사용자 화면은 INTERNAL을 snapshot 기사명과 무관하게 `플랫폼 즉시 제안`으로 표시하고 EXTERNAL은 공개 기사명을 유지한다. 상세의 `offers[].providerType`도 같은 의미를 사용한다.
 - 입찰 전에는 기사에게 지역, 일정, 서비스 방식, 부품 snapshot만 공개한다. 선택된 제안의 가상 결제가 `PAID`가 된 뒤에만 선택 기사에게 연락처, 주소, 자유 메모를 공개한다.
 - 외부 기사 프로필은 `PENDING/APPROVED/REJECTED` 검증 상태를 가진다. `APPROVED + ACTIVE + 표준 AS 동의`만 신규 요청함과 입찰 API를 이용할 수 있으며, 정지·거절·삭제 시 미선택 제안은 즉시 철회한다. 승인 후 정지된 기사는 기존에 선택된 작업 조회는 계속할 수 있다.
 - 요청 snapshot은 생성 후 수정하지 않는다. 사용자는 `ASSEMBLING` 전까지 취소한 뒤 새 요청을 만든다.
 - 요청 상태는 `REQUESTED → OFFERED → MATCHED → CONFIRMED → ASSEMBLING → SHIPPED → COMPLETED`이며 종료 상태는 `CANCELLED`다.
 - 제안 상태는 `AVAILABLE/SELECTED/WITHDRAWN/EXPIRED`다. 한 요청에는 `SELECTED`가 최대 한 건이며 선택 후 가격 수정은 금지한다.
+- 제안 활동 snapshot은 신규 이벤트부터 `warrantyDays`, `message`를 포함하고 철회 이벤트는 `withdrawalReason`을 별도로 기록한다. V134는 신규 필드만 추가하며 가격 공식 변경을 위한 추가 migration은 없다.
 - 가상 결제는 `PENDING/PAID/CANCELLED/REFUNDED` 상태만 기록하며 실제 PG, 카드·계좌 정보, 금전 거래는 없다.
 - 타인 요청은 소유권 정보 노출을 막기 위해 404로 처리한다.
 

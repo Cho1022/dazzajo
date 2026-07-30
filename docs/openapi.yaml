@@ -1879,7 +1879,7 @@ paths:
   /api/technician/assembly-requests/{id}/offers:
     post:
       summary: 외부 기사 직접 제안 제출
-      description: 요청 row를 잠근 뒤 외부 AVAILABLE 제안이 3건 미만인지 확인한다. 기사당 요청별 제안은 1건이다.
+      description: 요청 row를 잠근 뒤 외부 AVAILABLE 제안이 3건 미만인지 확인한다. 기사당 요청별 제안은 1건이며, 가격은 요청 snapshot과 assemblyFee로 서버가 계산한다.
       parameters:
         - $ref: "#/components/parameters/PublicId"
       requestBody:
@@ -1887,7 +1887,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/TechnicianOfferRequest"
+              $ref: "#/components/schemas/TechnicianOfferCreateRequest"
       responses:
         "200":
           description: 본인 AVAILABLE 제안을 포함한 요청 상세
@@ -1904,6 +1904,7 @@ paths:
   /api/technician/offers/{id}:
     patch:
       summary: 본인 AVAILABLE 제안 수정
+      description: 모든 필드는 선택이며, 가격은 수정 후 assemblyFee와 요청 snapshot으로 서버가 다시 계산한다.
       parameters:
         - $ref: "#/components/parameters/PublicId"
       requestBody:
@@ -1911,7 +1912,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/TechnicianOfferRequest"
+              $ref: "#/components/schemas/TechnicianOfferUpdateRequest"
       responses:
         "200":
           description: 수정된 본인 제안
@@ -10368,7 +10369,7 @@ components:
         externalOffer: { type: object, nullable: true, additionalProperties: true }
     AssemblyOfferDto:
       type: object
-      required: [id, technicianId, technicianName, status, confirmedPartsPrice, assemblyFee, deliveryFee, finalPrice, leadTimeDays, stockStatus]
+      required: [id, technicianId, technicianName, providerType, status, confirmedPartsPrice, assemblyFee, deliveryFee, finalPrice, leadTimeDays, stockStatus, warrantyDays]
       properties:
         id: { type: string, format: uuid }
         technicianId: { type: string, format: uuid }
@@ -10386,12 +10387,14 @@ components:
         providerType: { type: string, enum: [INTERNAL, EXTERNAL] }
         verified: { type: boolean }
         status: { type: string, enum: [AVAILABLE, SELECTED, WITHDRAWN, EXPIRED] }
-        confirmedPartsPrice: { type: integer, format: int64 }
+        confirmedPartsPrice: { type: integer, format: int64, description: 서비스 유형과 요청 부품가 snapshot으로 서버가 계산한 금액 }
         assemblyFee: { type: integer, format: int64 }
-        deliveryFee: { type: integer, format: int64 }
-        finalPrice: { type: integer, format: int64 }
+        deliveryFee: { type: integer, format: int64, description: 신규 RFQ 가격 정책에서는 0 }
+        finalPrice: { type: integer, format: int64, description: 서버가 계산한 confirmedPartsPrice + assemblyFee + deliveryFee }
         leadTimeDays: { type: integer }
         stockStatus: { type: string }
+        warrantyDays: { type: integer, minimum: 0, maximum: 365 }
+        message: { type: string, maxLength: 500, nullable: true }
         adminNote: { type: string, nullable: true }
         submittedAt: { type: string, format: date-time, nullable: true }
     AssemblyPaymentDto:
@@ -10420,8 +10423,38 @@ components:
             items:
               type: array
               items:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/AssemblyRequestSummaryDto"
+    AssemblyRequestSummaryDto:
+      type: object
+      required: [id, requestNo, status, serviceType, region, preferredDate, deliveryMethod, estimatedPartsPrice, itemCount, availableOfferCount, finalPrice, technicianName, providerType, paymentStatus]
+      properties:
+        id: { type: string, format: uuid }
+        requestNo: { type: string }
+        status:
+          type: string
+          enum: [REQUESTED, OFFERED, MATCHED, CONFIRMED, ASSEMBLING, SHIPPED, COMPLETED, CANCELLED]
+        serviceType: { type: string, enum: [FULL_SERVICE, ASSEMBLY_ONLY] }
+        region: { type: string }
+        preferredDate: { type: string, format: date }
+        deliveryMethod: { type: string, enum: [DELIVERY, PICKUP] }
+        estimatedPartsPrice: { type: integer, format: int64 }
+        itemCount: { type: integer }
+        availableOfferCount: { type: integer }
+        finalPrice: { type: integer, format: int64, nullable: true }
+        technicianName: { type: string, nullable: true }
+        providerType:
+          type: string
+          enum: [INTERNAL, EXTERNAL]
+          nullable: true
+          description: 선택 제안의 기사 유형. 선택 제안이 없으면 null이다.
+        paymentStatus:
+          type: string
+          enum: [PENDING, PAID, CANCELLED, REFUNDED]
+          nullable: true
+        userEmail: { type: string, format: email, nullable: true }
+        userName: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time, nullable: true }
+        updatedAt: { type: string, format: date-time, nullable: true }
     AssemblyStatusUpdateRequest:
       type: object
       required: [status]
@@ -10437,18 +10470,18 @@ components:
       required: [technicianId]
       properties:
         technicianId: { type: string, format: uuid }
-        confirmedPartsPrice: { type: integer, format: int64, minimum: 0 }
+        confirmedPartsPrice: { type: integer, format: int64, minimum: 0, deprecated: true, description: 하위 호환 입력이며 신규 RFQ 가격 계산에서는 무시 }
         assemblyFee: { type: integer, format: int64, minimum: 0 }
-        deliveryFee: { type: integer, format: int64, minimum: 0 }
+        deliveryFee: { type: integer, format: int64, minimum: 0, deprecated: true, description: 하위 호환 입력이며 신규 RFQ 가격 계산에서는 무시 }
         leadTimeDays: { type: integer, minimum: 1 }
         stockStatus: { type: string }
         adminNote: { type: string }
     AssemblyOfferUpdateRequest:
       type: object
       properties:
-        confirmedPartsPrice: { type: integer, format: int64, minimum: 0 }
+        confirmedPartsPrice: { type: integer, format: int64, minimum: 0, deprecated: true, description: 하위 호환 입력이며 신규 RFQ 가격 계산에서는 무시 }
         assemblyFee: { type: integer, format: int64, minimum: 0 }
-        deliveryFee: { type: integer, format: int64, minimum: 0 }
+        deliveryFee: { type: integer, format: int64, minimum: 0, deprecated: true, description: 하위 호환 입력이며 신규 RFQ 가격 계산에서는 무시 }
         leadTimeDays: { type: integer, minimum: 1 }
         stockStatus: { type: string }
         adminNote: { type: string, nullable: true }
@@ -10518,29 +10551,44 @@ components:
       required: [reason]
       properties:
         reason: { type: string, minLength: 1, maxLength: 1000 }
-    TechnicianOfferRequest:
+    TechnicianOfferCreateRequest:
       type: object
-      required: [confirmedPartsPrice, assemblyFee, deliveryFee, leadTimeDays, stockStatus]
+      required: [stockStatus]
       properties:
-        confirmedPartsPrice: { type: integer, format: int64, minimum: 0 }
+        confirmedPartsPrice: { type: integer, format: int64, minimum: 0, deprecated: true, description: 하위 호환 입력이며 서버 가격 계산에서는 무시 }
         assemblyFee: { type: integer, format: int64, minimum: 0 }
-        deliveryFee: { type: integer, format: int64, minimum: 0 }
+        deliveryFee: { type: integer, format: int64, minimum: 0, deprecated: true, description: 하위 호환 입력이며 서버 가격 계산에서는 무시 }
         leadTimeDays: { type: integer, minimum: 1 }
         stockStatus: { type: string, minLength: 1, maxLength: 255 }
-        note: { type: string, maxLength: 1000, nullable: true }
+        warrantyDays: { type: integer, minimum: 0, maximum: 365 }
+        message: { type: string, maxLength: 500, nullable: true }
+        note: { type: string, maxLength: 500, nullable: true, deprecated: true }
+    TechnicianOfferUpdateRequest:
+      type: object
+      properties:
+        confirmedPartsPrice: { type: integer, format: int64, minimum: 0, deprecated: true, description: 하위 호환 입력이며 서버 가격 계산에서는 무시 }
+        assemblyFee: { type: integer, format: int64, minimum: 0 }
+        deliveryFee: { type: integer, format: int64, minimum: 0, deprecated: true, description: 하위 호환 입력이며 서버 가격 계산에서는 무시 }
+        leadTimeDays: { type: integer, minimum: 1 }
+        stockStatus: { type: string, minLength: 1, maxLength: 255 }
+        warrantyDays: { type: integer, minimum: 0, maximum: 365 }
+        message: { type: string, maxLength: 500, nullable: true }
+        note: { type: string, maxLength: 500, nullable: true, deprecated: true }
     TechnicianOwnOfferDto:
       type: object
-      required: [id, status, confirmedPartsPrice, assemblyFee, deliveryFee, finalPrice, leadTimeDays, stockStatus]
+      required: [id, status, confirmedPartsPrice, assemblyFee, deliveryFee, finalPrice, leadTimeDays, stockStatus, warrantyDays]
       properties:
         id: { type: string, format: uuid }
         status: { type: string, enum: [AVAILABLE, SELECTED, WITHDRAWN, EXPIRED] }
-        confirmedPartsPrice: { type: integer, format: int64 }
+        confirmedPartsPrice: { type: integer, format: int64, description: 서비스 유형과 요청 부품가 snapshot으로 서버가 계산한 금액 }
         assemblyFee: { type: integer, format: int64 }
-        deliveryFee: { type: integer, format: int64 }
-        finalPrice: { type: integer, format: int64 }
+        deliveryFee: { type: integer, format: int64, description: 신규 RFQ 가격 정책에서는 0 }
+        finalPrice: { type: integer, format: int64, description: 서버 계산 최종 금액 }
         leadTimeDays: { type: integer }
         stockStatus: { type: string }
-        note: { type: string, nullable: true }
+        warrantyDays: { type: integer, minimum: 0, maximum: 365 }
+        message: { type: string, maxLength: 500, nullable: true }
+        note: { type: string, maxLength: 500, nullable: true, deprecated: true }
         submittedAt: { type: string, format: date-time, nullable: true }
         updatedAt: { type: string, format: date-time, nullable: true }
     TechnicianRequestSummaryDto:

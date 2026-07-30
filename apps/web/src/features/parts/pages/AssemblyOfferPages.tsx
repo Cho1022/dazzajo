@@ -19,7 +19,9 @@ import {
 import { useEffect, useRef, useState } from 'react';
 import type React from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
+import { MutationToast } from '../../../components/feedback/MutationToast';
 import { Panel, Screen, StateMessage, StatusBadge } from '../../../components/ui';
+import { ApiError } from '../../../lib/api';
 import {
   cancelAssemblyRequest,
   getAssemblyRequest,
@@ -55,13 +57,16 @@ const OFFER_SORT_OPTIONS: Array<{ value: OfferSortKey; label: string }> = [
 
 export function CheckoutOffersPage() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const { requestId } = useParams();
   const [selectedOfferId, setSelectedOfferId] = useState<string | null>(null);
   const [offerSort, setOfferSort] = useState<OfferSortKey>('newest');
   const [newOfferNotice, setNewOfferNotice] = useState('');
+  const [selectionError, setSelectionError] = useState('');
   const previousAvailableCount = useRef<number | null>(null);
+  const requestQueryKey = ['assembly-request', requestId] as const;
   const requestQuery = useQuery({
-    queryKey: ['assembly-request', requestId],
+    queryKey: requestQueryKey,
     queryFn: () => getAssemblyRequest(requestId!),
     enabled: Boolean(requestId),
     refetchInterval: (query) => {
@@ -74,7 +79,24 @@ export function CheckoutOffersPage() {
   });
   const selectMutation = useMutation({
     mutationFn: (offerId: string) => selectAssemblyOffer(requestId!, offerId),
-    onSuccess: (request) => navigate(`/checkout/payment/${request.id}`)
+    onMutate: () => setSelectionError(''),
+    onSuccess: async (request) => {
+      queryClient.setQueryData(['assembly-request', request.id], request);
+      await queryClient.invalidateQueries({ queryKey: ['assembly-requests'] });
+      navigate(`/checkout/payment/${request.id}`);
+    },
+    onError: async (error) => {
+      setSelectedOfferId(null);
+      if (isSelectionConflict(error)) {
+        setSelectionError('다른 변경이 먼저 반영되었습니다. 최신 제안 상태를 다시 불러왔습니다.');
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: requestQueryKey }),
+          queryClient.invalidateQueries({ queryKey: ['assembly-requests'] })
+        ]);
+        return;
+      }
+      setSelectionError(selectionErrorMessage(error));
+    }
   });
 
   useEffect(() => {
@@ -86,6 +108,14 @@ export function CheckoutOffersPage() {
     previousAvailableCount.current = availableCount;
   }, [requestQuery.data?.offers]);
 
+  useEffect(() => {
+    if (!selectedOfferId || !requestQuery.data) return;
+    const selectedOffer = requestQuery.data.offers.find((offer) => offer.id === selectedOfferId);
+    if (requestQuery.data.status !== 'OFFERED' || selectedOffer?.status !== 'AVAILABLE') {
+      setSelectedOfferId(null);
+    }
+  }, [requestQuery.data, selectedOfferId]);
+
   if (!requestId) return <MissingAssemblyRequest />;
   if (requestQuery.isLoading) return <AssemblyLoading />;
   if (requestQuery.isError || !requestQuery.data) return <AssemblyError />;
@@ -94,14 +124,16 @@ export function CheckoutOffersPage() {
   const persistedSelectedId = request.selectedOfferId ?? null;
   const effectiveSelectedId = selectedOfferId ?? persistedSelectedId;
   const selectedOffer = request.offers.find((offer) => offer.id === effectiveSelectedId) ?? null;
-  const selectable = request.status === 'OFFERED';
   const activeOffers = request.offers.filter((offer) => ['AVAILABLE', 'SELECTED'].includes(offer.status));
   const internalOfferCount = activeOffers.filter((offer) => offer.providerType !== 'EXTERNAL').length;
   const externalOfferCount = activeOffers.filter((offer) => offer.providerType === 'EXTERNAL').length;
   const sortedOffers = sortAssemblyOffers(request.offers, offerSort);
+  const externalOffers = sortedOffers.filter((offer) => offer.providerType === 'EXTERNAL');
+  const internalOffers = sortedOffers.filter((offer) => offer.providerType === 'INTERNAL');
 
   return (
     <Screen>
+      <MutationToast message={selectionError} onClose={() => setSelectionError('')} />
       <header className="mb-5">
         <div>
           <Link to="/my/assembly-requests" className="inline-flex items-center gap-2 text-sm font-black text-brand-blue hover:underline">
@@ -111,8 +143,8 @@ export function CheckoutOffersPage() {
             <h1 className="text-3xl font-black tracking-tight text-commerce-ink">기사 제안 {activeOffers.length}건</h1>
             <StatusBadge status={request.status} />
           </div>
-          <p className="mt-2 max-w-2xl break-keep text-sm leading-6 text-slate-600">기사별 부품 확인가, 조립비와 완료 일정을 비교한 뒤 한 건을 선택하세요.</p>
-          <div className="mt-2 flex flex-wrap gap-2 text-xs font-black"><span className="rounded bg-slate-100 px-2 py-1 text-commerce-ink">Dazzajo 기사 {internalOfferCount}/2</span><span className="rounded bg-blue-50 px-2 py-1 text-blue-800">외부 파트너 {externalOfferCount}/3</span></div>
+          <p className="mt-2 max-w-2xl break-keep text-sm leading-6 text-slate-600">등록 기사와 플랫폼의 작업 조건, 보증 기간과 서버가 계산한 최종 결제 예정액을 비교해 한 건을 선택하세요.</p>
+          <div className="mt-2 flex flex-wrap gap-2 text-xs font-black"><span className="rounded bg-blue-50 px-2 py-1 text-blue-800">등록 기사 {externalOfferCount}건</span><span className="rounded bg-slate-100 px-2 py-1 text-commerce-ink">플랫폼 제안 {internalOfferCount}건</span></div>
         </div>
       </header>
 
@@ -126,16 +158,34 @@ export function CheckoutOffersPage() {
           {newOfferNotice ? <StateMessage type="success" title="새 제안 도착" body={newOfferNotice} /> : null}
           {request.offers.length === 0 ? (
             <StateMessage type="info" title="기사 제안을 준비하고 있습니다" body="지역과 서비스 조건에 맞는 기사 제안이 등록되면 이 화면에서 바로 비교할 수 있습니다." />
-          ) : sortedOffers.map((offer) => (
-            <AssemblyOfferCard
-              key={offer.id}
-              offer={offer}
-              serviceType={request.serviceType}
-              selected={offer.id === effectiveSelectedId}
-              selectable={selectable && offer.status === 'AVAILABLE'}
-              onSelect={() => setSelectedOfferId(offer.id)}
-            />
-          ))}
+          ) : (
+            <>
+              <OfferSection
+                id="external-offer-section"
+                title="등록 기사 제안"
+                description="승인된 조립 기사가 직접 제안한 공임과 작업 조건입니다."
+                emptyMessage="아직 등록 기사가 제출한 제안이 없습니다."
+                offers={externalOffers}
+                request={request}
+                effectiveSelectedId={effectiveSelectedId}
+                selectionPending={selectMutation.isPending}
+                pendingOfferId={selectMutation.isPending ? selectMutation.variables ?? null : null}
+                onSelect={setSelectedOfferId}
+              />
+              <OfferSection
+                id="internal-offer-section"
+                title="플랫폼 즉시 제안"
+                description="플랫폼이 제공하는 기존 자동 제안입니다."
+                emptyMessage="현재 이용 가능한 플랫폼 즉시 제안이 없습니다."
+                offers={internalOffers}
+                request={request}
+                effectiveSelectedId={effectiveSelectedId}
+                selectionPending={selectMutation.isPending}
+                pendingOfferId={selectMutation.isPending ? selectMutation.variables ?? null : null}
+                onSelect={setSelectedOfferId}
+              />
+            </>
+          )}
         </section>
 
         <aside className="min-w-0 xl:sticky xl:top-5 xl:self-start">
@@ -146,21 +196,21 @@ export function CheckoutOffersPage() {
             </div>
             <div className="space-y-4 p-5">
               <SummaryRow label="조립 요청번호" value={request.requestNo} valueClassName="min-w-0 break-all text-right text-xs" />
-              <SummaryRow label="견적 예상가" value={`${request.estimatedPartsPrice.toLocaleString()}원`} />
+              <SummaryRow label={request.serviceType === 'FULL_SERVICE' ? '부품 스냅샷 금액' : '부품'} value={request.serviceType === 'FULL_SERVICE' ? `${request.estimatedPartsPrice.toLocaleString()}원` : '사용자 준비'} />
               <SummaryRow label="조립 지역" value={request.region} />
               <SummaryRow label="희망 일정" value={request.preferredDate} />
               <div className="border-t border-commerce-line pt-4">
                 {selectedOffer ? (
                   <div className="space-y-3">
                     <div className="flex items-center gap-3">
-                      <TechnicianAvatar offer={selectedOffer} compact />
+                      {selectedOffer.providerType === 'EXTERNAL' ? <TechnicianAvatar offer={selectedOffer} compact /> : <div className="grid h-10 w-10 shrink-0 place-items-center rounded-md bg-commerce-ink text-white"><Wrench size={17} /></div>}
                       <div className="min-w-0">
-                        <div className="text-xs font-bold text-slate-500">선택 기사</div>
-                        <div className="mt-1 truncate text-lg font-black text-commerce-ink">{selectedOffer.technicianName}</div>
+                        <div className="text-xs font-bold text-slate-500">선택 제안</div>
+                        <div className="mt-1 truncate text-lg font-black text-commerce-ink">{offerDisplayName(selectedOffer)}</div>
                       </div>
                     </div>
-                    <SummaryRow label="배송비" value={formatDeliveryFee(selectedOffer.deliveryFee)} />
-                    <SummaryRow label="최종 제안가" value={`${selectedOffer.finalPrice.toLocaleString()}원`} strong />
+                    <SummaryRow label="배송 조건" value="작업 확정 후 별도 안내" valueClassName="text-right text-xs" />
+                    <SummaryRow label="최종 결제 예정액" value={`${selectedOffer.finalPrice.toLocaleString()}원`} strong />
                   </div>
                 ) : <EmptySelection />}
               </div>
@@ -171,14 +221,13 @@ export function CheckoutOffersPage() {
                   disabled={!selectedOffer || selectMutation.isPending}
                   className="flex min-h-12 w-full items-center justify-center gap-2 rounded-md bg-[#de6c2d] px-4 py-3 text-sm font-black text-white hover:bg-[#c75f27] disabled:cursor-not-allowed disabled:bg-slate-300"
                 >
-                  <BadgeCheck size={17} /> {selectMutation.isPending ? '기사 배정 중...' : '선택한 제안 승인'}
+                  <BadgeCheck size={17} /> {selectMutation.isPending ? '제안 선택 중...' : '선택한 제안 승인'}
                 </button>
               ) : (
                 <Link to={`/checkout/payment/${request.id}`} className="flex min-h-12 items-center justify-center gap-2 rounded-md bg-[#de6c2d] px-4 text-sm font-black text-white hover:bg-[#c75f27]">
                   <CreditCard size={17} /> 결제 상태 확인
                 </Link>
               )}
-              {selectMutation.isError ? <MutationError error={selectMutation.error} /> : null}
             </div>
           </section>
         </aside>
@@ -378,21 +427,74 @@ export function AssemblyRequestDetailPage() {
   );
 }
 
-function AssemblyOfferCard({ offer, serviceType, selected, selectable, onSelect }: { offer: AssemblyOffer; serviceType: AssemblyRequest['serviceType']; selected: boolean; selectable: boolean; onSelect: () => void }) {
+type OfferSectionProps = {
+  id: string;
+  title: string;
+  description: string;
+  emptyMessage: string;
+  offers: AssemblyOffer[];
+  request: AssemblyRequest;
+  effectiveSelectedId: string | null;
+  selectionPending: boolean;
+  pendingOfferId: string | null;
+  onSelect: (offerId: string) => void;
+};
+
+function OfferSection({ id, title, description, emptyMessage, offers, request, effectiveSelectedId, selectionPending, pendingOfferId, onSelect }: OfferSectionProps) {
+  return (
+    <section data-testid={id} aria-labelledby={`${id}-title`} className="space-y-3 rounded-lg border border-commerce-line bg-slate-50/60 p-4">
+      <div>
+        <div className="flex flex-wrap items-center gap-2">
+          <h2 id={`${id}-title`} className="text-xl font-black text-commerce-ink">{title}</h2>
+          <span className="rounded-full bg-white px-2.5 py-1 text-xs font-black text-slate-600">{offers.length}건</span>
+        </div>
+        <p className="mt-1 break-keep text-sm leading-6 text-slate-600">{description}</p>
+      </div>
+      {offers.length === 0 ? (
+        <div className="rounded-md border border-dashed border-slate-300 bg-white p-4 text-sm font-bold text-slate-500">{emptyMessage}</div>
+      ) : offers.map((offer) => (
+        <AssemblyOfferCard
+          key={offer.id}
+          offer={offer}
+          serviceType={request.serviceType}
+          estimatedPartsPrice={request.estimatedPartsPrice}
+          selected={offer.id === effectiveSelectedId}
+          selectable={request.status === 'OFFERED' && offer.status === 'AVAILABLE' && !selectionPending}
+          pending={selectionPending && pendingOfferId === offer.id}
+          onSelect={() => onSelect(offer.id)}
+        />
+      ))}
+    </section>
+  );
+}
+
+function AssemblyOfferCard({ offer, serviceType, estimatedPartsPrice, selected, selectable, pending, onSelect }: { offer: AssemblyOffer; serviceType: AssemblyRequest['serviceType']; estimatedPartsPrice: number; selected: boolean; selectable: boolean; pending: boolean; onSelect: () => void }) {
   const specialty = offer.specialties.join(' · ');
+  const external = offer.providerType === 'EXTERNAL';
+  const message = offerMessage(offer);
   return (
     <article className={`rounded-lg border bg-white p-5 shadow-sm transition ${selected ? 'border-[#de6c2d] ring-2 ring-[#f8d7c4]' : offer.status === 'WITHDRAWN' || offer.status === 'EXPIRED' ? 'border-slate-200 opacity-55' : 'border-commerce-line'}`}>
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div className="flex min-w-0 items-start gap-3">
-          <TechnicianAvatar offer={offer} />
+          {external ? <TechnicianAvatar offer={offer} /> : <div className="grid h-14 w-14 shrink-0 place-items-center rounded-md bg-commerce-ink text-white"><Wrench size={22} /></div>}
           <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2"><h2 className="text-lg font-black text-commerce-ink">{offer.technicianName}</h2><span className={`rounded px-2 py-1 text-[11px] font-black ${offer.providerType === 'EXTERNAL' ? 'bg-blue-50 text-blue-800' : 'bg-slate-100 text-commerce-ink'}`}>{offer.providerType === 'EXTERNAL' ? '외부 파트너' : 'Dazzajo 기사'}</span>{offer.verified ? <span className="inline-flex items-center gap-1 rounded bg-emerald-50 px-2 py-1 text-[11px] font-black text-emerald-800"><BadgeCheck size={12} /> 검증 완료</span> : null}<span className="inline-flex items-center gap-1 rounded bg-emerald-50 px-2 py-1 text-[11px] font-black text-emerald-800"><ShieldCheck size={12} /> 표준 AS 적용</span>{offer.status !== 'AVAILABLE' ? <StatusBadge status={offer.status} /> : null}</div>
-            <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs font-bold text-slate-500"><span className="inline-flex items-center gap-1 text-amber-600"><Star size={13} fill="currentColor" /> {Number(offer.rating).toFixed(1)}</span><span>완료 {offer.completedJobs}건</span><span>평균 응답 {offer.responseMinutes}분</span>{specialty ? <span>{specialty}</span> : null}</div>
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="text-lg font-black text-commerce-ink">{offerDisplayName(offer)}</h3>
+              <span className={`rounded px-2 py-1 text-[11px] font-black ${external ? 'bg-blue-50 text-blue-800' : 'bg-slate-100 text-commerce-ink'}`}>{external ? '등록 기사' : '플랫폼 자동 제안'}</span>
+              {external && offer.verified ? <span className="inline-flex items-center gap-1 rounded bg-emerald-50 px-2 py-1 text-[11px] font-black text-emerald-800"><BadgeCheck size={12} /> 검증 완료</span> : null}
+              <span className="inline-flex items-center gap-1 rounded bg-emerald-50 px-2 py-1 text-[11px] font-black text-emerald-800"><ShieldCheck size={12} /> 표준 AS 적용</span>
+              <OfferStatusBadge status={offer.status} />
+            </div>
+            {external ? <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs font-bold text-slate-500"><span className="inline-flex items-center gap-1 text-amber-600"><Star size={13} fill="currentColor" /> {Number(offer.rating).toFixed(1)}</span><span>완료 {offer.completedJobs}건</span><span>평균 응답 {offer.responseMinutes}분</span>{specialty ? <span>{specialty}</span> : null}</div> : null}
           </div>
         </div>
-        <button type="button" onClick={onSelect} disabled={!selectable} aria-pressed={selected} className={`min-h-10 shrink-0 rounded-md px-4 text-sm font-black transition ${selected ? 'bg-[#de6c2d] text-white' : 'border border-[#de6c2d] bg-white text-[#de6c2d] hover:bg-[#fff4ed] disabled:border-commerce-line disabled:text-slate-400 disabled:hover:bg-white disabled:cursor-not-allowed'}`}>{selected ? '선택됨' : '이 기사 선택'}</button>
+        <button type="button" onClick={onSelect} disabled={!selectable} aria-pressed={selected} className={`min-h-10 shrink-0 rounded-md px-4 text-sm font-black transition ${selected ? 'bg-[#de6c2d] text-white' : 'border border-[#de6c2d] bg-white text-[#de6c2d] hover:bg-[#fff4ed] disabled:border-commerce-line disabled:text-slate-400 disabled:hover:bg-white disabled:cursor-not-allowed'}`}>{pending ? '선택 중...' : selected ? '선택됨' : external ? '이 기사 선택' : '이 제안 선택'}</button>
       </div>
-      <div className="mt-5 grid gap-3 border-t border-commerce-line pt-4 sm:grid-cols-2 lg:grid-cols-5"><OfferMetric label="부품 확인가" value={serviceType === 'FULL_SERVICE' ? `${offer.confirmedPartsPrice.toLocaleString()}원` : '사용자 준비'} /><OfferMetric label="조립비" value={`${offer.assemblyFee.toLocaleString()}원`} /><OfferMetric label="배송비" value={formatDeliveryFee(offer.deliveryFee)} /><OfferMetric label="완료 예상" value={`${offer.leadTimeDays}일`} /><OfferMetric label="최종 제안가" value={`${offer.finalPrice.toLocaleString()}원`} accent /></div>
+      <div className="mt-5 grid gap-3 border-t border-commerce-line pt-4 sm:grid-cols-2 lg:grid-cols-5"><OfferMetric label={serviceType === 'FULL_SERVICE' ? '부품 스냅샷 금액' : '부품'} value={serviceType === 'FULL_SERVICE' ? `${estimatedPartsPrice.toLocaleString()}원` : '사용자 준비'} /><OfferMetric label="조립 공임" value={`${offer.assemblyFee.toLocaleString()}원`} /><OfferMetric label="완료 예상" value={`${offer.leadTimeDays}일`} /><OfferMetric label="보증 기간" value={warrantyLabel(offer.warrantyDays)} /><OfferMetric label="최종 결제 예정액" value={`${offer.finalPrice.toLocaleString()}원`} accent /></div>
+      <div className="mt-4 rounded-md bg-slate-50 p-3">
+        <div className="text-[11px] font-bold text-slate-500">제안 메시지</div>
+        <p className="mt-1 whitespace-pre-wrap break-words text-sm font-bold leading-6 text-commerce-ink [overflow-wrap:anywhere]">{message ?? '별도 제안 메시지가 없습니다.'}</p>
+      </div>
       <div className="mt-3 flex items-center gap-2 text-xs font-bold text-emerald-700"><BadgeCheck size={14} /> {offer.stockStatus}</div>
     </article>
   );
@@ -418,14 +520,18 @@ function TechnicianAvatar({ offer, compact = false }: { offer: Pick<AssemblyOffe
 }
 
 function RequestProgress({ request, offer }: { request: AssemblyRequest; offer: AssemblyOffer }) {
+  const selectedName = offerDisplayName(offer);
+  const selectedDescription = offer.providerType === 'EXTERNAL'
+    ? `${selectedName} 제안이 선택된 요청입니다.`
+    : '플랫폼 즉시 제안이 선택된 요청입니다.';
   return (
     <section className="overflow-hidden rounded-lg border border-emerald-200 bg-white shadow-product">
-      <div className="border-b border-emerald-100 bg-emerald-50 px-5 py-5"><div className="inline-flex items-center gap-2 rounded bg-white px-3 py-1 text-xs font-black text-emerald-800"><CheckCircle2 size={15} /> {STATUS_LABELS[request.status]}</div><h1 className="mt-3 text-3xl font-black text-commerce-ink">조립 요청 진행 상태</h1><p className="mt-2 text-sm leading-6 text-emerald-950">{offer.technicianName} 기사와 매칭된 요청입니다.</p></div>
+      <div className="border-b border-emerald-100 bg-emerald-50 px-5 py-5"><div className="inline-flex items-center gap-2 rounded bg-white px-3 py-1 text-xs font-black text-emerald-800"><CheckCircle2 size={15} /> {STATUS_LABELS[request.status]}</div><h1 className="mt-3 text-3xl font-black text-commerce-ink">조립 요청 진행 상태</h1><p className="mt-2 text-sm leading-6 text-emerald-950">{selectedDescription}</p></div>
       <div className="p-5">
-        <div className="grid gap-3 border-b border-commerce-line pb-5 sm:grid-cols-3"><Metric label="조립 요청번호" value={request.requestNo} /><Metric label="선택 기사" value={offer.technicianName} /><Metric label="최종 제안가" value={`${offer.finalPrice.toLocaleString()}원`} accent /></div>
+        <div className="grid gap-3 border-b border-commerce-line pb-5 sm:grid-cols-3"><Metric label="조립 요청번호" value={request.requestNo} /><Metric label="선택 제안" value={selectedName} /><Metric label="최종 결제 예정액" value={`${offer.finalPrice.toLocaleString()}원`} accent /></div>
         <h2 className="mt-6 text-lg font-black text-commerce-ink">진행 상태</h2>
         <div className="mt-4 grid gap-3 md:grid-cols-4"><TimelineStep icon={<CheckCircle2 size={17} />} label="요청·매칭" done={!['REQUESTED', 'OFFERED'].includes(request.status)} /><TimelineStep icon={<CreditCard size={17} />} label="포인트 결제" done={['PAID', 'REFUNDED'].includes(request.payment?.status ?? '')} /><TimelineStep icon={<Wrench size={17} />} label="조립" done={['SHIPPED', 'COMPLETED'].includes(request.status)} active={['CONFIRMED', 'ASSEMBLING'].includes(request.status)} /><TimelineStep icon={<Truck size={17} />} label="배송·완료" done={request.status === 'COMPLETED'} active={request.status === 'SHIPPED'} /></div>
-        <div className="mt-6 grid gap-3 sm:grid-cols-2"><InfoLine icon={<MapPin size={17} />} label="조립 지역" value={request.region} /><InfoLine icon={<CalendarDays size={17} />} label="희망 일정" value={request.preferredDate} /><InfoLine icon={<Clock3 size={17} />} label="예상 소요" value={`${offer.leadTimeDays}일`} /><InfoLine icon={<ShieldCheck size={17} />} label="AS 정책" value="Dazzajo 표준 AS 적용" /></div>
+        <div className="mt-6 grid gap-3 sm:grid-cols-2"><InfoLine icon={<MapPin size={17} />} label="조립 지역" value={request.region} /><InfoLine icon={<CalendarDays size={17} />} label="희망 일정" value={request.preferredDate} /><InfoLine icon={<Clock3 size={17} />} label="예상 소요" value={`${offer.leadTimeDays}일`} /><InfoLine icon={<ShieldCheck size={17} />} label="AS 정책" value="Dazzajo 표준 AS 적용" /><InfoLine icon={<ShieldCheck size={17} />} label="보증 기간" value={warrantyLabel(offer.warrantyDays)} /></div>
       </div>
     </section>
   );
@@ -446,7 +552,7 @@ function AssemblyHistoryCard({ request }: { request: AssemblyRequestSummary }) {
         <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs font-bold text-slate-500">
           <span>{request.region}</span>
           <span>{request.preferredDate}</span>
-          <span>{request.technicianName ?? '기사 배정 전'}</span>
+          <span>{requestTechnicianDisplayName(request)}</span>
           <span>부품 {request.itemCount}개</span>
         </div>
         {hasAvailableOffer ? (
@@ -491,6 +597,43 @@ function offerCreatedTime(offer: AssemblyOffer) {
   const time = offer.createdAt ? new Date(offer.createdAt).getTime() : 0;
   return Number.isNaN(time) ? 0 : time;
 }
+function requestTechnicianDisplayName(request: AssemblyRequestSummary) {
+  return request.providerType === 'INTERNAL'
+    ? '플랫폼 즉시 제안'
+    : request.technicianName ?? '기사 배정 전';
+}
+function offerDisplayName(offer: AssemblyOffer) { return offer.providerType === 'EXTERNAL' ? offer.technicianName : '플랫폼 즉시 제안'; }
+function offerMessage(offer: AssemblyOffer) {
+  const message = offer.message ?? offer.note;
+  return message?.trim() ? message.trim() : null;
+}
+function warrantyLabel(warrantyDays?: number | null) {
+  if (warrantyDays == null) return '보증 정보 없음';
+  return warrantyDays === 0 ? '보증 없음' : `${warrantyDays}일 보증`;
+}
+function OfferStatusBadge({ status }: { status: AssemblyOffer['status'] }) {
+  const labels: Record<AssemblyOffer['status'], string> = {
+    AVAILABLE: '선택 가능',
+    SELECTED: '선택 완료',
+    WITHDRAWN: '철회됨',
+    EXPIRED: '마감됨'
+  };
+  const tone = status === 'SELECTED'
+    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+    : status === 'AVAILABLE'
+      ? 'border-blue-200 bg-blue-50 text-blue-700'
+      : 'border-slate-200 bg-slate-100 text-slate-600';
+  return <span className={`inline-flex rounded-full border px-2 py-1 text-[11px] font-bold ${tone}`}>{labels[status]}</span>;
+}
+function isSelectionConflict(error: unknown) {
+  return error instanceof ApiError && (error.status === 409 || error.code === 'CONFLICT_STATE');
+}
+function selectionErrorMessage(error: unknown) {
+  if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+    return '제안을 선택할 권한이 없거나 로그인이 만료되었습니다.';
+  }
+  return '제안을 선택하지 못했습니다. 잠시 후 다시 시도해 주세요.';
+}
 function EmptySelection() { return <div className="rounded-md border border-dashed border-slate-300 bg-slate-50 p-4 text-sm font-bold text-slate-500">비교할 기사 제안을 선택하세요.</div>; }
 function MissingAssemblyRequest() { return <StateWrap title="조립 요청 정보가 없습니다" body="현재 견적으로 조립 요청서를 먼저 작성해 주세요." action="/checkout" actionLabel="조립 요청서 작성" />; }
 function AssemblyLoading() { return <Screen><div className="rounded-lg border border-commerce-line bg-white p-8 text-sm font-bold text-slate-500">조립 요청 정보를 불러오는 중입니다.</div></Screen>; }
@@ -499,7 +642,6 @@ function StateWrap({ title, body, action, actionLabel }: { title: string; body: 
 function Metric({ label, value, accent = false }: { label: string; value: string; accent?: boolean }) { return <div><div className="text-xs font-bold text-slate-500">{label}</div><div className={`mt-1 font-black ${accent ? 'text-commerce-sale' : 'text-commerce-ink'}`}>{value}</div></div>; }
 function OfferMetric({ label, value, accent = false }: { label: string; value: string; accent?: boolean }) { return <div><div className="text-[11px] font-bold text-slate-500">{label}</div><div className={`mt-1 text-sm font-black ${accent ? 'text-commerce-sale' : 'text-commerce-ink'}`}>{value}</div></div>; }
 function SummaryRow({ label, value, strong = false, valueClassName = '' }: { label: string; value: string; strong?: boolean; valueClassName?: string }) { return <div className="flex items-center justify-between gap-4 text-sm"><span className="shrink-0 font-bold text-slate-500">{label}</span><span className={`${strong ? 'text-lg font-black text-commerce-sale' : 'font-black text-commerce-ink'} ${valueClassName}`}>{value}</span></div>; }
-function formatDeliveryFee(deliveryFee: number) { return deliveryFee === 0 ? '무료' : `${deliveryFee.toLocaleString()}원`; }
 function TimelineStep({ icon, label, done = false, active = false }: { icon: React.ReactNode; label: string; done?: boolean; active?: boolean }) {
   const style = done
     ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
