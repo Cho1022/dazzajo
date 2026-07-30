@@ -38,6 +38,13 @@ buildgraph-before-*.sql
 # 로컬 부하/내구 테스트 원시 로그(runId별 누적, 요약 보고서만 docs에 커밋)
 infra/k6/reports/
 
+# 실행 시 다시 생성되는 감사 원본·렌더링 산출물. Markdown 요약과 tools의 canonical QA 입력은 추적한다.
+docs/reports/**/*.json
+docs/reports/**/*.png
+docs/reports/**/*.html
+docs/reports/**/*.zip
+generated-diagrams/
+
 # 기획 및 디자인 문서 무시
 DESIGN.md
 PRODUCT.md

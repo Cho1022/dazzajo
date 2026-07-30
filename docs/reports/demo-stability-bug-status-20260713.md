@@ -274,7 +274,7 @@
 
 | 단계 | 실행 | PASS | 확정 사례 | 독립 원인 | 의심 | 최초 감사 근거 |
 |---|---:|---:|---:|---:|---:|---|
-| 1차 Build Chat 상태형 API | 100 case / 300 turn | 74 | 26 | 5 | 0 | [Markdown](build-chat-stateful-audit-20260714-phase1.md) · [JSON](build-chat-stateful-audit-20260714-phase1.json) |
+| 1차 Build Chat 상태형 API | 100 case / 300 turn | 74 | 26 | 5 | 0 | [Markdown](build-chat-stateful-audit-20260714-phase1.md) · [JSON](https://github.com/Cho1022/dazzajo/blob/v1-rfq-baseline/docs/reports/build-chat-stateful-audit-20260714-phase1.json) |
 | 1차 대표 웹 재현 | 20 | 14 | 6 | 위 1차 원인에 포함 | 0 | 아래 `확정 사례 86건 목록`에 case와 실패 유형 보존 |
 | 2차 4분 데모 API | 100 | 65 | 35 | 3, 이 중 신규 1 | 0 | 아래 `확정 사례 86건 목록`에 35개 case ID 보존 |
 | 2차 대표 웹 재현 | 20 | 14 | 6 | 위 2차 원인에 포함 | 0 | 동일 API 원인의 웹 재현으로 아래 목록에 연결 |
@@ -286,11 +286,11 @@
 
 | 단계 | 최종 결과 | 검증 범위 | 최종 보고서 |
 |---|---:|---|---|
-| 1차 Build Chat 상태형 API | 100/100 PASS | 300턴, draft 원복 100/100, 확정·의심 0 | [Markdown](build-chat-stateful-audit-20260714-phase1-final.md) · [JSON](build-chat-stateful-audit-20260714-phase1-final.json) |
-| 1차 대표 웹 재현 | 20/20 PASS | 고위험 체인의 실제 브라우저 입력·응답 | [Markdown](build-chat-stateful-web-audit-20260714.md) · [JSON](build-chat-stateful-web-audit-20260714.json) |
-| 2차 4분 데모 API | 100/100 PASS | 추천, GPU 하향·복구, 조립, 진단 동의, 원격지원 각 20건 | [Markdown](demo-journey-stateful-audit-20260714-phase2.md) · [JSON](demo-journey-stateful-audit-20260714-phase2.json) |
-| 2차 대표 웹 재현 | 20/20 PASS | 4분 데모 대표 상태 전이 | [Markdown](demo-journey-stateful-web-audit-20260714.md) · [JSON](demo-journey-stateful-web-audit-20260714.json) |
-| 3차 사용자 화면 Chromium | 100/100 PASS | strict 모드, 인증부터 모바일·권한까지 10개 그룹 | [Markdown](user-surface-stateful-audit-20260714-phase3.md) · [JSON](user-surface-stateful-audit-20260714-phase3.json) |
+| 1차 Build Chat 상태형 API | 100/100 PASS | 300턴, draft 원복 100/100, 확정·의심 0 | [Markdown](build-chat-stateful-audit-20260714-phase1-final.md) · [JSON](https://github.com/Cho1022/dazzajo/blob/v1-rfq-baseline/docs/reports/build-chat-stateful-audit-20260714-phase1-final.json) |
+| 1차 대표 웹 재현 | 20/20 PASS | 고위험 체인의 실제 브라우저 입력·응답 | [Markdown](build-chat-stateful-web-audit-20260714.md) · [JSON](https://github.com/Cho1022/dazzajo/blob/v1-rfq-baseline/docs/reports/build-chat-stateful-web-audit-20260714.json) |
+| 2차 4분 데모 API | 100/100 PASS | 추천, GPU 하향·복구, 조립, 진단 동의, 원격지원 각 20건 | [Markdown](demo-journey-stateful-audit-20260714-phase2.md) · [JSON](https://github.com/Cho1022/dazzajo/blob/v1-rfq-baseline/docs/reports/demo-journey-stateful-audit-20260714-phase2.json) |
+| 2차 대표 웹 재현 | 20/20 PASS | 4분 데모 대표 상태 전이 | [Markdown](demo-journey-stateful-web-audit-20260714.md) · [JSON](https://github.com/Cho1022/dazzajo/blob/v1-rfq-baseline/docs/reports/demo-journey-stateful-web-audit-20260714.json) |
+| 3차 사용자 화면 Chromium | 100/100 PASS | strict 모드, 인증부터 모바일·권한까지 10개 그룹 | [Markdown](user-surface-stateful-audit-20260714-phase3.md) · [JSON](https://github.com/Cho1022/dazzajo/blob/v1-rfq-baseline/docs/reports/user-surface-stateful-audit-20260714-phase3.json) |
 
 최종 PASS는 최초 확정 사례를 삭제하거나 오라클을 완화해 만든 수치가 아니다. 동일 corpus와 핵심 불변식을 유지한 채 제품 코드와 상태 연결을 수정한 뒤 다시 실행한 결과다. 응답 지연은 이 감사에서 진단 자료로만 기록했으며 timeout·5xx 외에는 기능 실패 판정에 사용하지 않았다.
 

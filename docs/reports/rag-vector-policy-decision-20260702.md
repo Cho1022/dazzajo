@@ -8,7 +8,7 @@
 
 ## 근거
 
-기준 파일: `docs/reports/rag-retrieval-benchmark-20260703.md`, `docs/reports/rag-retrieval-benchmark-20260703.json`
+기준 파일: [`rag-retrieval-benchmark-20260703.md`](rag-retrieval-benchmark-20260703.md), [`v1-rfq-baseline`의 JSON 원본](https://github.com/Cho1022/dazzajo/blob/v1-rfq-baseline/docs/reports/rag-retrieval-benchmark-20260703.json)
 
 실행 전 `POST /api/admin/rag-embeddings/backfill`로 reusable RAG chunk 29개 전체에 `text-embedding-3-small` embedding을 백필했다. 2026-07-03 재측정에서는 변경된 chunk 3개가 갱신됐고 `embeddedTotal=29` 상태에서 fresh benchmark를 실행했다.
 

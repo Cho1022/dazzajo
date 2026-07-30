@@ -39,5 +39,5 @@
 
 ## 원본 증거
 
-전체 상태 전이 응답과 2회 재현 기록은 `demo-journey-stateful-audit-20260714-phase2.json`에 있다.
+전체 상태 전이 응답과 2회 재현 기록은 [`v1-rfq-baseline`의 JSON 원본](https://github.com/Cho1022/dazzajo/blob/v1-rfq-baseline/docs/reports/demo-journey-stateful-audit-20260714-phase2.json)에 있다.
 브라우저 대표 재현 20개는 `.qa-results/stateful/demo-journey-stateful-web-replay.json`에 생성했다.

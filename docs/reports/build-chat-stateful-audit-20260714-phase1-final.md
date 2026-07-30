@@ -49,5 +49,5 @@
 
 ## 원본 증거
 
-전체 request/response, draft 전후 fingerprint, Tool 결과, 2회 재현 기록은 `build-chat-stateful-audit-20260714-phase1-final.json`에 있다.
+전체 request/response, draft 전후 fingerprint, Tool 결과, 2회 재현 기록은 [`v1-rfq-baseline`의 JSON 원본](https://github.com/Cho1022/dazzajo/blob/v1-rfq-baseline/docs/reports/build-chat-stateful-audit-20260714-phase1-final.json)에 있다.
 웹 재현 20개 입력은 `.qa-results/stateful/build-chat-stateful-web-replay.json`에 생성했다.

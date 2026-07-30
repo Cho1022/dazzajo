@@ -16,11 +16,11 @@
 
 ## 증거 자료
 
-스크린샷 저장 위치:
+스크린샷 보존 위치:
 
-`docs/reports/home-shopping-audit-20260703/screenshots/`
+[`v1-rfq-baseline`의 원본 감사 디렉터리](https://github.com/Cho1022/dazzajo/tree/v1-rfq-baseline/docs/reports/home-shopping-audit-20260703)
 
-주요 캡처:
+아래 파일명은 보존 태그의 `screenshots/`에 있는 주요 캡처다.
 
 - `01-home-after-login-viewport.png`: 로그인 후 홈 화면
 - `02-fast-route-gpu.png`: 자연어로 GPU 카테고리 이동
@@ -35,7 +35,7 @@
 - `20-recheck-gpu-cheaper-single-action.png`: GPU 하향 요청 action 단일화 재검증
 - `21-fresh-self-quote-after-fixes.png`: 수정 후 새로 진입한 셀프 견적 화면
 
-브라우저 원본 증거:
+브라우저 원본 증거도 위 보존 태그에 있다.
 
 - `self-quote-chat-matrix.json`
 - `recheck-chat-results.json`
@@ -47,7 +47,7 @@ Figma 보드 처리:
 - 오류 메시지: `You do not have permission to edit this file`
 - Debug UUID: `7170f719-7323-4723-8d38-421d3e31afbe`
 - 우회 산출물:
-  - `docs/reports/home-shopping-audit-20260703/figma-board/home-shopping-audit-board.png`
+  - 보존 태그의 `figma-board/home-shopping-audit-board.png`
   - 해당 이미지는 Figma에 수동 드래그 앤 드롭할 수 있는 단일 보드형 이미지다.
 
 ## 시나리오 검사 결과
