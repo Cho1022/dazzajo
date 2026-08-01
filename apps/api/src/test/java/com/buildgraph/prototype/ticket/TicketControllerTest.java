@@ -44,7 +44,7 @@ class TicketControllerTest {
     private CurrentUserService currentUserService;
 
     @MockitoBean
-    private AdminSupportChatQueueWebSocketHandler adminSupportChatQueueWebSocketHandler;
+    private SupportChatEventPublisher supportChatEventPublisher;
 
     @Test
     void userCanReadFinalAgentAsTicketStatus() throws Exception {
@@ -99,7 +99,7 @@ class TicketControllerTest {
                 .andExpect(jsonPath("$.supportChatRoomId").value("00000000-0000-4000-8000-000000009001"));
 
         verify(ticketQueryService).create(Map.of("symptom", "GPU 온도 상승"), USER);
-        verify(adminSupportChatQueueWebSocketHandler).broadcastQueuePatch("00000000-0000-4000-8000-000000009001");
+        verify(supportChatEventPublisher).publishRoomChanged("00000000-0000-4000-8000-000000009001");
     }
 
     @Test

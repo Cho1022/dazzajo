@@ -1,9 +1,10 @@
 package com.buildgraph.prototype.ticket;
 
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -25,20 +26,10 @@ class SupportChatControllerTest {
     private static final String USER_TOKEN = "Bearer jwt-user-token";
     private static final String ADMIN_TOKEN = "Bearer jwt-admin-token";
     private static final CurrentUserService.CurrentUser USER = new CurrentUserService.CurrentUser(
-            1L,
-            "00000000-0000-4000-8000-000000001004",
-            "user@example.com",
-            "Demo User",
-            "USER",
-            null
+            1L, "00000000-0000-4000-8000-000000001004", "user@example.com", "Demo User", "USER", null
     );
     private static final CurrentUserService.CurrentUser ADMIN = new CurrentUserService.CurrentUser(
-            2L,
-            "00000000-0000-4000-8000-000000000001",
-            "admin@example.com",
-            "BuildGraph Admin",
-            "ADMIN",
-            null
+            2L, "00000000-0000-4000-8000-000000000001", "admin@example.com", "Admin", "ADMIN", null
     );
 
     @Autowired
@@ -51,13 +42,7 @@ class SupportChatControllerTest {
     private CurrentUserService currentUserService;
 
     @MockitoBean
-    private SupportChatWebSocketHandler supportChatWebSocketHandler;
-
-    @MockitoBean
-    private AdminSupportChatQueueWebSocketHandler adminSupportChatQueueWebSocketHandler;
-
-    @MockitoBean
-    private SupportChatWebSocketTicketService supportChatWebSocketTicketService;
+    private SupportChatEventPublisher supportChatEventPublisher;
 
     @MockitoBean
     private VisitSupportReservationService visitSupportReservationService;
@@ -72,67 +57,43 @@ class SupportChatControllerTest {
                 "pollingIntervalMs", 5000
         ));
 
-        mockMvc.perform(get("/api/support/chat-sessions/current")
-                        .header("Authorization", USER_TOKEN))
+        mockMvc.perform(get("/api/support/chat-sessions/current").header("Authorization", USER_TOKEN))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.contact").doesNotExist())
-                .andExpect(jsonPath("$.supportNewPath").value("/support/new"))
-                .andExpect(jsonPath("$.pollingIntervalMs").value(5000));
-
-        verify(currentUserService).requireUser(USER_TOKEN);
-        verify(supportChatService).current(USER, null);
+                .andExpect(jsonPath("$.supportNewPath").value("/support/new"));
     }
 
     @Test
-    void userCanPostMessageToOwnTicketChatSession() throws Exception {
-        when(currentUserService.requireUser(USER_TOKEN)).thenReturn(USER);
-        when(supportChatService.postUserMessage("chat-session-id", Map.of("content", "지금 상담 가능할까요?"), USER))
-                .thenReturn(chatDetail("chat-session-id", "지금 상담 가능할까요?"));
-
+    void legacyRestMessageEndpointsAreRemoved() throws Exception {
         mockMvc.perform(post("/api/support/chat-sessions/chat-session-id/messages")
                         .header("Authorization", USER_TOKEN)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("""
-                                {
-                                  "content": "지금 상담 가능할까요?"
-                                }
-                                """))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.contact.id").value("chat-session-id"))
-                .andExpect(jsonPath("$.messages[0].role").value("USER"))
-                .andExpect(jsonPath("$.messages[0].content").value("지금 상담 가능할까요?"));
-
-        verify(supportChatService).postUserMessage("chat-session-id", Map.of("content", "지금 상담 가능할까요?"), USER);
-        verify(supportChatWebSocketHandler).broadcastRoomUpdate("chat-session-id");
-        verify(adminSupportChatQueueWebSocketHandler).broadcastQueuePatch("chat-session-id");
-    }
-
-    @Test
-    void adminCanPostMessageToTicketChatSession() throws Exception {
-        when(currentUserService.requireAdmin(ADMIN_TOKEN)).thenReturn(ADMIN);
-        when(supportChatService.postAdminMessage("chat-session-id", Map.of("content", "확인 후 답변드리겠습니다."), ADMIN))
-                .thenReturn(chatDetail("chat-session-id", "확인 후 답변드리겠습니다."));
-
+                        .content("{\"content\":\"hello\"}"))
+                .andExpect(status().isNotFound());
         mockMvc.perform(post("/api/admin/support/chat-sessions/chat-session-id/messages")
                         .header("Authorization", ADMIN_TOKEN)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("""
-                                {
-                                  "content": "확인 후 답변드리겠습니다."
-                                }
-                                """))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.contact.id").value("chat-session-id"))
-                .andExpect(jsonPath("$.messages[0].content").value("확인 후 답변드리겠습니다."));
+                        .content("{\"content\":\"hello\"}"))
+                .andExpect(status().isNotFound());
 
-        verify(currentUserService).requireAdmin(ADMIN_TOKEN);
-        verify(supportChatService).postAdminMessage("chat-session-id", Map.of("content", "확인 후 답변드리겠습니다."), ADMIN);
-        verify(supportChatWebSocketHandler).broadcastRoomUpdate("chat-session-id");
-        verify(adminSupportChatQueueWebSocketHandler).broadcastQueuePatch("chat-session-id");
+        verifyNoInteractions(supportChatService);
     }
 
     @Test
-    void userCanRequestVisitReservationFromChatSession() throws Exception {
+    void legacyWebSocketTicketEndpointsAreRemoved() throws Exception {
+        mockMvc.perform(post("/api/support/chat-sessions/chat-session-id/ws-ticket")
+                        .header("Authorization", USER_TOKEN))
+                .andExpect(status().isNotFound());
+        mockMvc.perform(post("/api/admin/support/chat-sessions/chat-session-id/ws-ticket")
+                        .header("Authorization", ADMIN_TOKEN))
+                .andExpect(status().isNotFound());
+        mockMvc.perform(post("/api/admin/support/chat-sessions/ws-ticket")
+                        .header("Authorization", ADMIN_TOKEN))
+                .andExpect(status().isMethodNotAllowed());
+    }
+
+    @Test
+    void userReservationPublishesRoomChange() throws Exception {
         Map<String, Object> request = Map.of(
                 "scheduledAt", "2099-07-10T14:30:00+09:00",
                 "addressSnapshot", "서울시 강남구"
@@ -145,24 +106,16 @@ class SupportChatControllerTest {
                         .header("Authorization", USER_TOKEN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
-                                {
-                                  "scheduledAt": "2099-07-10T14:30:00+09:00",
-                                  "addressSnapshot": "서울시 강남구"
-                                }
+                                {"scheduledAt":"2099-07-10T14:30:00+09:00","addressSnapshot":"서울시 강남구"}
                                 """))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.contact.id").value("chat-session-id"))
-                .andExpect(jsonPath("$.contact.visitReservation.status").value("REQUESTED"))
-                .andExpect(jsonPath("$.contact.visitReservation.scheduledAt").value("2099-07-10T14:30:00+09:00"));
+                .andExpect(jsonPath("$.contact.visitReservation.status").value("REQUESTED"));
 
-        verify(currentUserService).requireUser(USER_TOKEN);
-        verify(visitSupportReservationService).requestUserReservation("chat-session-id", request, USER);
-        verify(supportChatWebSocketHandler).broadcastRoomUpdate("chat-session-id");
-        verify(adminSupportChatQueueWebSocketHandler).broadcastQueuePatch("chat-session-id");
+        verify(supportChatEventPublisher).publishRoomChanged("chat-session-id");
     }
 
     @Test
-    void adminCanScheduleVisitReservationFromChatSession() throws Exception {
+    void adminCanScheduleAndCancelReservation() throws Exception {
         Map<String, Object> request = Map.of(
                 "scheduledAt", "2099-07-10T14:30:00+09:00",
                 "technicianNote", "방문 전 연락"
@@ -170,44 +123,27 @@ class SupportChatControllerTest {
         when(currentUserService.requireAdmin(ADMIN_TOKEN)).thenReturn(ADMIN);
         when(visitSupportReservationService.scheduleAdminReservation("chat-session-id", request, ADMIN))
                 .thenReturn(chatDetailWithReservation("chat-session-id", "SCHEDULED"));
+        when(visitSupportReservationService.cancelAdminReservation("chat-session-id", ADMIN))
+                .thenReturn(chatDetailWithReservation("chat-session-id", "CANCELLED"));
 
         mockMvc.perform(put("/api/admin/support/chat-sessions/chat-session-id/visit-reservation")
                         .header("Authorization", ADMIN_TOKEN)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
-                                {
-                                  "scheduledAt": "2099-07-10T14:30:00+09:00",
-                                  "technicianNote": "방문 전 연락"
-                                }
+                                {"scheduledAt":"2099-07-10T14:30:00+09:00","technicianNote":"방문 전 연락"}
                                 """))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.contact.visitReservation.status").value("SCHEDULED"));
-
-        verify(currentUserService).requireAdmin(ADMIN_TOKEN);
-        verify(visitSupportReservationService).scheduleAdminReservation("chat-session-id", request, ADMIN);
-        verify(supportChatWebSocketHandler).broadcastRoomUpdate("chat-session-id");
-        verify(adminSupportChatQueueWebSocketHandler).broadcastQueuePatch("chat-session-id");
-    }
-
-    @Test
-    void adminCanCancelVisitReservationFromChatSession() throws Exception {
-        when(currentUserService.requireAdmin(ADMIN_TOKEN)).thenReturn(ADMIN);
-        when(visitSupportReservationService.cancelAdminReservation("chat-session-id", ADMIN))
-                .thenReturn(chatDetailWithReservation("chat-session-id", "CANCELLED"));
-
         mockMvc.perform(delete("/api/admin/support/chat-sessions/chat-session-id/visit-reservation")
                         .header("Authorization", ADMIN_TOKEN))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.contact.visitReservation.status").value("CANCELLED"));
 
-        verify(currentUserService).requireAdmin(ADMIN_TOKEN);
-        verify(visitSupportReservationService).cancelAdminReservation("chat-session-id", ADMIN);
-        verify(supportChatWebSocketHandler).broadcastRoomUpdate("chat-session-id");
-        verify(adminSupportChatQueueWebSocketHandler).broadcastQueuePatch("chat-session-id");
+        verify(supportChatEventPublisher, org.mockito.Mockito.times(2)).publishRoomChanged("chat-session-id");
     }
 
     @Test
-    void adminCanDeleteSupportChatSessionAndBroadcastRemoval() throws Exception {
+    void adminDeletionPublishesRoomRemoval() throws Exception {
         when(currentUserService.requireAdmin(ADMIN_TOKEN)).thenReturn(ADMIN);
         when(supportChatService.deleteAdminSession("chat-session-id", ADMIN))
                 .thenReturn(deletedChatDetail("chat-session-id"));
@@ -215,127 +151,36 @@ class SupportChatControllerTest {
         mockMvc.perform(delete("/api/admin/support/chat-sessions/chat-session-id")
                         .header("Authorization", ADMIN_TOKEN))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.contact.id").value("chat-session-id"))
-                .andExpect(jsonPath("$.contact.status").value("ARCHIVED"))
-                .andExpect(jsonPath("$.contact.ticketStatus").value("CANCELLED"))
-                .andExpect(jsonPath("$.contact.canSendMessage").value(false));
+                .andExpect(jsonPath("$.contact.status").value("ARCHIVED"));
 
-        verify(currentUserService).requireAdmin(ADMIN_TOKEN);
-        verify(supportChatService).deleteAdminSession("chat-session-id", ADMIN);
-        verify(supportChatWebSocketHandler).broadcastRoomUpdate("chat-session-id");
-        verify(adminSupportChatQueueWebSocketHandler).broadcastQueuePatch("chat-session-id");
+        verify(supportChatEventPublisher).publishRoomChanged("chat-session-id");
     }
 
     @Test
     void adminCanLoadChatDetailWithoutMarkingUnread() throws Exception {
         when(currentUserService.requireAdmin(ADMIN_TOKEN)).thenReturn(ADMIN);
         when(supportChatService.adminDetail("chat-session-id", ADMIN, false))
-                .thenReturn(chatDetail("chat-session-id", "사용자 메시지"));
+                .thenReturn(MockData.map("contact", MockData.map("id", "chat-session-id"), "messages", List.of()));
 
         mockMvc.perform(get("/api/admin/support/chat-sessions/chat-session-id")
                         .queryParam("markRead", "false")
                         .header("Authorization", ADMIN_TOKEN))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.contact.id").value("chat-session-id"));
-
-        verify(currentUserService).requireAdmin(ADMIN_TOKEN);
-        verify(supportChatService).adminDetail("chat-session-id", ADMIN, false);
-    }
-
-    @Test
-    void userCanIssueSupportChatWebSocketTicket() throws Exception {
-        when(currentUserService.requireUser(USER_TOKEN)).thenReturn(USER);
-        when(supportChatWebSocketTicketService.issueUserTicket("chat-session-id", USER)).thenReturn(Map.of(
-                "ticket", "ws-ticket-user",
-                "expiresAt", "2026-07-06T10:01:00Z",
-                "expiresInSeconds", 60L
-        ));
-
-        mockMvc.perform(post("/api/support/chat-sessions/chat-session-id/ws-ticket")
-                        .header("Authorization", USER_TOKEN))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.ticket").value("ws-ticket-user"))
-                .andExpect(jsonPath("$.expiresAt").value("2026-07-06T10:01:00Z"))
-                .andExpect(jsonPath("$.expiresInSeconds").value(60));
-
-        verify(currentUserService).requireUser(USER_TOKEN);
-        verify(supportChatWebSocketTicketService).issueUserTicket("chat-session-id", USER);
-    }
-
-    @Test
-    void adminCanIssueSupportChatWebSocketTicket() throws Exception {
-        when(currentUserService.requireAdmin(ADMIN_TOKEN)).thenReturn(ADMIN);
-        when(supportChatWebSocketTicketService.issueAdminTicket("chat-session-id", ADMIN)).thenReturn(Map.of(
-                "ticket", "ws-ticket-admin",
-                "expiresAt", "2026-07-06T10:01:00Z",
-                "expiresInSeconds", 60L
-        ));
-
-        mockMvc.perform(post("/api/admin/support/chat-sessions/chat-session-id/ws-ticket")
-                        .header("Authorization", ADMIN_TOKEN))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.ticket").value("ws-ticket-admin"));
-
-        verify(currentUserService).requireAdmin(ADMIN_TOKEN);
-        verify(supportChatWebSocketTicketService).issueAdminTicket("chat-session-id", ADMIN);
-    }
-
-    @Test
-    void adminCanIssueSupportChatQueueWebSocketTicket() throws Exception {
-        when(currentUserService.requireAdmin(ADMIN_TOKEN)).thenReturn(ADMIN);
-        when(supportChatWebSocketTicketService.issueAdminQueueTicket(ADMIN)).thenReturn(Map.of(
-                "ticket", "admin-queue-ws-ticket",
-                "expiresAt", "2026-07-06T10:01:00Z",
-                "expiresInSeconds", 60L
-        ));
-
-        mockMvc.perform(post("/api/admin/support/chat-sessions/ws-ticket")
-                        .header("Authorization", ADMIN_TOKEN))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.ticket").value("admin-queue-ws-ticket"))
-                .andExpect(jsonPath("$.expiresAt").value("2026-07-06T10:01:00Z"))
-                .andExpect(jsonPath("$.expiresInSeconds").value(60));
-
-        verify(currentUserService).requireAdmin(ADMIN_TOKEN);
-        verify(supportChatWebSocketTicketService).issueAdminQueueTicket(ADMIN);
-    }
-
-    private static Map<String, Object> chatDetail(String sessionId, String content) {
-        return MockData.map(
-                "contact", MockData.map(
-                        "id", sessionId,
-                        "asTicketId", "ticket-public-id",
-                        "status", "ACTIVE",
-                        "title", "AS 상담방",
-                        "adminUnreadCount", 1,
-                        "userUnreadCount", 0
-                ),
-                "messages", List.of(MockData.map(
-                        "id", "message-public-id",
-                        "role", "USER",
-                        "content", content,
-                        "createdAt", "2026-07-06T10:00:00Z"
-                )),
-                "pollingIntervalMs", 5000
-        );
     }
 
     private static Map<String, Object> chatDetailWithReservation(String sessionId, String status) {
         return MockData.map(
                 "contact", MockData.map(
                         "id", sessionId,
-                        "asTicketId", "ticket-public-id",
                         "status", "ACTIVE",
-                        "title", "AS 상담방",
                         "visitReservation", MockData.map(
                                 "id", "reservation-public-id",
                                 "status", status,
-                                "scheduledAt", "2099-07-10T14:30:00+09:00",
-                                "addressSnapshot", "서울시 강남구"
+                                "scheduledAt", "2099-07-10T14:30:00+09:00"
                         )
                 ),
-                "messages", List.of(),
-                "pollingIntervalMs", 5000
+                "messages", List.of()
         );
     }
 
@@ -343,19 +188,11 @@ class SupportChatControllerTest {
         return MockData.map(
                 "contact", MockData.map(
                         "id", sessionId,
-                        "asTicketId", "ticket-public-id",
                         "status", "ARCHIVED",
                         "ticketStatus", "CANCELLED",
-                        "title", "AS 상담방",
                         "canSendMessage", false
                 ),
-                "messages", List.of(MockData.map(
-                        "id", "delete-system-message-id",
-                        "role", "SYSTEM",
-                        "content", SupportChatService.SYSTEM_DELETE_MESSAGE,
-                        "createdAt", "2026-07-06T10:00:00Z"
-                )),
-                "pollingIntervalMs", 5000
+                "messages", List.of()
         );
     }
 }

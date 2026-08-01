@@ -214,6 +214,7 @@ const diagnosisOnlyTicket = {
 test('captures Agent AS demo UI evidence and verifies admin decision reflection', async ({ page }) => {
   // 화면 증적 캡처 + 티켓 상담방 채팅 흐름까지 한 번에 도는 긴 테스트라 병렬 부하에서 30초를 넘길 수 있다.
   test.slow();
+  await mockAgentAsSupportStomp(page);
   const consoleErrors: string[] = [];
   const apiCalls: string[] = [];
   const tickets = new Map<string, MockTicket>([
@@ -555,6 +556,9 @@ test('captures Agent AS demo UI evidence and verifies admin decision reflection'
   await ticketChat.getByPlaceholder('관리자 답변을 입력하세요').fill('원격 지원 링크를 보내드렸습니다.');
   await ticketChat.getByRole('button', { name: '답변 전송' }).click();
   await expect(ticketChat).toContainText('원격 지원 링크를 보내드렸습니다.');
+  chatMessagePayload = await page.evaluate(() => (
+    window as unknown as { __agentAsChatPayload?: Record<string, unknown> }
+  ).__agentAsChatPayload);
   expect(chatMessagePayload).toMatchObject({ content: '원격 지원 링크를 보내드렸습니다.' });
   await expect(ticketChat.getByPlaceholder('관리자 답변을 입력하세요')).toHaveValue('');
 
@@ -603,7 +607,6 @@ test('captures Agent AS demo UI evidence and verifies admin decision reflection'
     'GET /api/admin/as-tickets/qa-ticket-before',
     'POST /api/admin/as-tickets/qa-ticket-before/approve-remote-support',
     'GET /api/admin/support/chat-sessions',
-    'POST /api/admin/support/chat-sessions/qa-chat-room-1/messages',
     'DELETE /api/admin/as-tickets/qa-ticket-no-samples'
   ]));
   expect(consoleErrors).toEqual([]);
@@ -628,4 +631,107 @@ async function fulfillTicket(route: Route, ticket: unknown) {
     return;
   }
   await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(ticket) });
+}
+
+async function mockAgentAsSupportStomp(page: Page) {
+  await page.addInitScript(() => {
+    type FakeSocketShape = EventTarget & {
+      readyState: number;
+      frames: string[];
+      serverMessage: (data: string) => void;
+    };
+    const sockets: FakeSocketShape[] = [];
+
+    class FakeWebSocket extends EventTarget {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+      readyState = FakeWebSocket.CONNECTING;
+      binaryType: BinaryType = 'blob';
+      protocol = 'v12.stomp';
+      extensions = '';
+      bufferedAmount = 0;
+      frames: string[] = [];
+      onopen: ((event: Event) => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onclose: ((event: CloseEvent) => void) | null = null;
+      onerror: ((event: Event) => void) | null = null;
+
+      constructor(public readonly url: string) {
+        super();
+        sockets.push(this as unknown as FakeSocketShape);
+        setTimeout(() => {
+          this.readyState = FakeWebSocket.OPEN;
+          const event = new Event('open');
+          this.onopen?.(event);
+        }, 0);
+      }
+
+      send(data: string | ArrayBufferLike | Blob | ArrayBufferView) {
+        const frame = String(data);
+        this.frames.push(frame);
+        if (frame.startsWith('CONNECT\n') || frame.startsWith('STOMP\n')) {
+          setTimeout(() => this.serverMessage('CONNECTED\nversion:1.2\nheart-beat:0,0\n\n\0'), 0);
+          return;
+        }
+        if (frame.startsWith('SEND\n')) {
+          const payload = JSON.parse(frame.slice(frame.indexOf('\n\n') + 2).replace(/\0$/, '')) as {
+            roomId: string;
+            clientMessageId: string;
+            content: string;
+          };
+          (window as unknown as { __agentAsChatPayload?: Record<string, unknown> }).__agentAsChatPayload = payload;
+          const destination = `/topic/support-chat/rooms/${payload.roomId}`;
+          const subscription = [...this.frames].reverse().find((candidate) =>
+            candidate.startsWith('SUBSCRIBE\n') && stompHeader(candidate, 'destination') === destination
+          );
+          if (!subscription) return;
+          const event = {
+            type: 'MESSAGE_CREATED',
+            messageId: '00000000-0000-4000-8000-000000009999',
+            clientMessageId: payload.clientMessageId,
+            roomId: payload.roomId,
+            senderId: 'admin-001',
+            senderRole: 'ADMIN',
+            senderName: 'BuildGraph Admin',
+            content: payload.content,
+            createdAt: '2026-07-02T07:05:00Z',
+            room: {
+              roomId: payload.roomId,
+              asTicketId: 'qa-ticket-before',
+              status: 'ACTIVE',
+              ticketStatus: 'OPEN',
+              title: 'AS 상담방',
+              symptom: 'GPU temperature spike during gaming',
+              lastMessage: payload.content,
+              lastMessageAt: '2026-07-02T07:05:00Z',
+              userUnreadCount: 1,
+              adminUnreadCount: 0,
+              canSendMessage: true,
+              user: { id: 'user-001', email: 'user@example.com', name: 'QA User' }
+            }
+          };
+          this.serverMessage(
+            `MESSAGE\nsubscription:${stompHeader(subscription, 'id')}\ndestination:${destination}\nmessage-id:test-message\ncontent-type:application/json\n\n${JSON.stringify(event)}\0`
+          );
+        }
+      }
+
+      serverMessage(data: string) {
+        this.onmessage?.(new MessageEvent('message', { data }));
+      }
+
+      close() {
+        this.readyState = FakeWebSocket.CLOSED;
+        this.onclose?.(new CloseEvent('close', { code: 1000 }));
+      }
+    }
+
+    function stompHeader(frame: string, name: string) {
+      return frame.split('\n').find((line) => line.startsWith(`${name}:`))?.slice(name.length + 1);
+    }
+
+    (window as unknown as { WebSocket: typeof WebSocket }).WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+  });
 }
