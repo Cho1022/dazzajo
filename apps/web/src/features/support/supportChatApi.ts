@@ -1,5 +1,12 @@
+import { Client, type IMessage, type StompSubscription } from '@stomp/stompjs';
 import { API_BASE_URL, api, getToken } from '../../lib/api';
-import type { SupportChatSessionDto, SupportChatSessionListDto } from './types';
+import type { SupportChatContact, SupportChatSessionDto, SupportChatSessionListDto } from './types';
+
+const SUPPORT_CHAT_ENDPOINT = '/ws/support-chat';
+const SEND_DESTINATION = '/app/support-chat/messages';
+const ROOM_TOPIC_PREFIX = '/topic/support-chat/rooms/';
+const ADMIN_QUEUE_TOPIC = '/topic/support-chat/admin-queue';
+const ERROR_QUEUE = '/user/queue/support-chat-errors';
 
 export function getCurrentSupportChat(asTicketId?: string | null, summary = false) {
   const params = new URLSearchParams();
@@ -13,23 +20,10 @@ export function getSupportChatSession(sessionId: string) {
   return api<SupportChatSessionDto>(`/api/support/chat-sessions/${sessionId}`);
 }
 
-export function postSupportChatMessage(sessionId: string, content: string) {
-  return api<SupportChatSessionDto>(`/api/support/chat-sessions/${sessionId}/messages`, {
-    method: 'POST',
-    body: JSON.stringify({ content })
-  });
-}
-
 export function putSupportChatVisitReservation(sessionId: string, payload: { scheduledAt: string; addressSnapshot?: string }) {
   return api<SupportChatSessionDto>(`/api/support/chat-sessions/${sessionId}/visit-reservation`, {
     method: 'PUT',
     body: JSON.stringify(payload)
-  });
-}
-
-export function postSupportChatWebSocketTicket(sessionId: string) {
-  return api<SupportChatWebSocketTicketDto>(`/api/support/chat-sessions/${sessionId}/ws-ticket`, {
-    method: 'POST'
   });
 }
 
@@ -40,13 +34,6 @@ export function getAdminSupportChatSession(sessionId: string, markRead = true) {
 
 export function getAdminSupportChatSessions() {
   return api<SupportChatSessionListDto>('/api/admin/support/chat-sessions');
-}
-
-export function postAdminSupportChatMessage(sessionId: string, content: string) {
-  return api<SupportChatSessionDto>(`/api/admin/support/chat-sessions/${sessionId}/messages`, {
-    method: 'POST',
-    body: JSON.stringify({ content })
-  });
 }
 
 export function deleteAdminSupportChatSession(sessionId: string) {
@@ -68,158 +55,205 @@ export function deleteAdminSupportChatVisitReservation(sessionId: string) {
   });
 }
 
-export function postAdminSupportChatWebSocketTicket(sessionId: string) {
-  return api<SupportChatWebSocketTicketDto>(`/api/admin/support/chat-sessions/${sessionId}/ws-ticket`, {
-    method: 'POST'
-  });
-}
-
-export function postAdminSupportChatQueueWebSocketTicket() {
-  return api<SupportChatWebSocketTicketDto>('/api/admin/support/chat-sessions/ws-ticket', {
-    method: 'POST'
-  });
-}
-
-export type SupportChatSocket = {
-  close: () => void;
+export type SupportChatMessageEvent = {
+  type: 'MESSAGE_CREATED';
+  messageId: string;
+  clientMessageId: string;
+  roomId: string;
+  senderId: string;
+  senderRole: 'USER' | 'ADMIN' | 'SYSTEM';
+  senderName?: string | null;
+  content: string;
+  createdAt?: string;
+  room: SupportChatRoomSummary;
 };
 
-type SupportChatWebSocketTicketDto = {
-  ticket?: string;
-  expiresAt?: string;
-  expiresInSeconds?: number;
+export type SupportChatRoomSummary = {
+  roomId: string;
+  asTicketId: string;
+  status: string;
+  ticketStatus?: string;
+  title: string;
+  symptom?: string;
+  lastMessage?: string | null;
+  lastMessageAt?: string | null;
+  userUnreadCount?: number;
+  adminUnreadCount?: number;
+  assignedAdminId?: string | null;
+  canSendMessage?: boolean;
+  user?: SupportChatContact['user'];
 };
 
-type SupportChatSocketError = {
-  type?: string;
+export type SupportChatRoomEvent = {
+  type: 'ROOM_UPDATED' | 'ROOM_REMOVED';
+  roomId: string;
+  room?: SupportChatRoomSummary | null;
+  refreshRequired?: boolean;
+};
+
+export type SupportChatSocketError = {
+  clientMessageId?: string | null;
   code?: string;
   message?: string;
   retryable?: boolean;
 };
 
-type SupportChatQueueFrame = {
-  type?: string;
-  contact?: SupportChatSessionListDto['items'][number];
-  id?: string;
-  pollingIntervalMs?: number;
-} & SupportChatSocketError;
+export type SupportChatSocket = {
+  close: () => void;
+  sendMessage: (content: string, clientMessageId?: string) => string;
+  isConnected: () => boolean;
+};
+
+export function roomSummaryToContact(room: SupportChatRoomSummary): SupportChatContact {
+  return {
+    id: room.roomId,
+    asTicketId: room.asTicketId,
+    status: room.status,
+    ticketStatus: room.ticketStatus,
+    title: room.title,
+    symptom: room.symptom,
+    lastMessagePreview: room.lastMessage,
+    lastMessageAt: room.lastMessageAt,
+    userUnreadCount: room.userUnreadCount,
+    adminUnreadCount: room.adminUnreadCount,
+    assignedAdminId: room.assignedAdminId,
+    canSendMessage: room.canSendMessage,
+    user: room.user
+  };
+}
 
 export async function openSupportChatSocket(options: {
   mode: 'user' | 'admin';
   sessionId: string;
-  onDetail: (detail: SupportChatSessionDto) => void;
+  onMessage: (event: SupportChatMessageEvent) => void;
+  onRoom?: (event: SupportChatRoomEvent) => void;
   onOpen?: () => void;
   onClose?: () => void;
   onError?: () => void;
   onSocketError?: (error: SupportChatSocketError) => void;
 }): Promise<SupportChatSocket | null> {
-  if (!getToken() || typeof WebSocket === 'undefined') {
-    return null;
-  }
-  const ticketResponse = options.mode === 'admin'
-    ? await postAdminSupportChatWebSocketTicket(options.sessionId)
-    : await postSupportChatWebSocketTicket(options.sessionId);
-  if (!ticketResponse.ticket) {
-    return null;
-  }
-  const socket = new WebSocket(supportChatSocketUrl(options.mode, options.sessionId));
-  let connected = false;
-  socket.addEventListener('open', () => {
-    socket.send(JSON.stringify({ type: 'AUTH', ticket: ticketResponse.ticket }));
-  });
-  socket.addEventListener('close', () => options.onClose?.());
-  socket.addEventListener('error', () => options.onError?.());
-  socket.addEventListener('message', (event) => {
-    try {
-      const payload = JSON.parse(String(event.data)) as { type?: string; detail?: SupportChatSessionDto } & SupportChatSocketError;
-      if (payload.type === 'CHAT_UPDATED' && payload.detail) {
-        options.onDetail(payload.detail);
-        if (!connected) {
-          connected = true;
-          options.onOpen?.();
-        }
-        return;
-      }
-      if (payload.type === 'ERROR') {
-        options.onSocketError?.(payload);
-      }
-    } catch {
-      // Polling remains the fallback when a socket payload is malformed.
-    }
-  });
-  return {
-    close() {
-      socket.close();
-    }
-  };
-}
-
-function supportChatSocketUrl(mode: 'user' | 'admin', sessionId: string) {
-  const base = API_BASE_URL || window.location.origin;
-  const url = new URL('/ws/support-chat', base);
-  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-  url.searchParams.set('mode', mode);
-  url.searchParams.set('sessionId', sessionId);
-  return url.toString();
+  return createSupportChatClient({ ...options, subscribeAdminQueue: false });
 }
 
 export async function openAdminSupportChatQueueSocket(options: {
-  onUpdated: (contact: SupportChatSessionListDto['items'][number]) => void;
+  onUpdated: (contact: SupportChatContact) => void;
   onRemoved: (id: string) => void;
   onOpen?: () => void;
   onClose?: () => void;
   onError?: () => void;
   onSocketError?: (error: SupportChatSocketError) => void;
 }): Promise<SupportChatSocket | null> {
-  if (!getToken() || typeof WebSocket === 'undefined') {
-    return null;
-  }
-  const ticketResponse = await postAdminSupportChatQueueWebSocketTicket();
-  if (!ticketResponse.ticket) {
-    return null;
-  }
-  const socket = new WebSocket(adminSupportChatQueueSocketUrl());
-  let connected = false;
-  socket.addEventListener('open', () => {
-    socket.send(JSON.stringify({ type: 'AUTH', ticket: ticketResponse.ticket }));
-  });
-  socket.addEventListener('close', () => options.onClose?.());
-  socket.addEventListener('error', () => options.onError?.());
-  socket.addEventListener('message', (event) => {
-    try {
-      const payload = JSON.parse(String(event.data)) as SupportChatQueueFrame;
-      if (payload.type === 'SUPPORT_CHAT_QUEUE_READY') {
-        if (!connected) {
-          connected = true;
-          options.onOpen?.();
-        }
-        return;
+  return createSupportChatClient({
+    mode: 'admin',
+    sessionId: null,
+    subscribeAdminQueue: true,
+    onMessage: () => undefined,
+    onOpen: options.onOpen,
+    onClose: options.onClose,
+    onError: options.onError,
+    onSocketError: options.onSocketError,
+    onRoom: (event) => {
+      if (event.type === 'ROOM_REMOVED') {
+        options.onRemoved(event.roomId);
+      } else if (event.room) {
+        options.onUpdated(roomSummaryToContact(event.room));
       }
-      if (payload.type === 'SUPPORT_CHAT_QUEUE_UPDATED' && payload.contact) {
-        options.onUpdated(payload.contact);
-        return;
-      }
-      if (payload.type === 'SUPPORT_CHAT_QUEUE_REMOVED' && payload.id) {
-        options.onRemoved(payload.id);
-        return;
-      }
-      if (payload.type === 'ERROR') {
-        options.onSocketError?.(payload);
-      }
-    } catch {
-      // Polling remains the fallback when a socket payload is malformed.
     }
   });
+}
+
+function createSupportChatClient(options: {
+  mode: 'user' | 'admin';
+  sessionId: string | null;
+  subscribeAdminQueue: boolean;
+  onMessage: (event: SupportChatMessageEvent) => void;
+  onRoom?: (event: SupportChatRoomEvent) => void;
+  onOpen?: () => void;
+  onClose?: () => void;
+  onError?: () => void;
+  onSocketError?: (error: SupportChatSocketError) => void;
+}): SupportChatSocket | null {
+  const token = getToken();
+  if (!token || typeof WebSocket === 'undefined') return null;
+
+  let subscriptions: StompSubscription[] = [];
+  const client = new Client({
+    brokerURL: supportChatSocketUrl(),
+    connectHeaders: { Authorization: `Bearer ${token}` },
+    reconnectDelay: 5_000,
+    heartbeatIncoming: 10_000,
+    heartbeatOutgoing: 10_000,
+    beforeConnect: async () => {
+      const latestToken = getToken();
+      if (!latestToken) throw new Error('Login is required.');
+      client.connectHeaders = { Authorization: `Bearer ${latestToken}` };
+    },
+    onConnect: () => {
+      subscriptions = [];
+      if (options.sessionId) {
+        subscriptions.push(client.subscribe(`${ROOM_TOPIC_PREFIX}${options.sessionId}`, (frame) => {
+          const payload = parseFrame<SupportChatMessageEvent | SupportChatRoomEvent>(frame);
+          if (!payload) return;
+          if (payload.type === 'MESSAGE_CREATED') options.onMessage(payload);
+          else options.onRoom?.(payload);
+        }));
+      }
+      if (options.subscribeAdminQueue) {
+        subscriptions.push(client.subscribe(ADMIN_QUEUE_TOPIC, (frame) => {
+          const payload = parseFrame<SupportChatRoomEvent>(frame);
+          if (payload) options.onRoom?.(payload);
+        }));
+      }
+      subscriptions.push(client.subscribe(ERROR_QUEUE, (frame) => {
+        const payload = parseFrame<SupportChatSocketError>(frame);
+        if (payload) options.onSocketError?.(payload);
+      }));
+      options.onOpen?.();
+    },
+    onWebSocketClose: () => options.onClose?.(),
+    onWebSocketError: () => options.onError?.(),
+    onStompError: (frame) => options.onSocketError?.({
+      code: 'SUPPORT_CHAT_BROKER_ERROR',
+      message: frame.headers.message ?? '상담 연결을 처리하지 못했습니다.',
+      retryable: true
+    })
+  });
+  client.activate();
+
   return {
     close() {
-      socket.close();
+      subscriptions.forEach((subscription) => subscription.unsubscribe());
+      subscriptions = [];
+      void client.deactivate();
+    },
+    sendMessage(content, clientMessageId = crypto.randomUUID()) {
+      if (!client.connected || !options.sessionId) {
+        throw new Error('상담 연결이 끊겨 있어 메시지를 보낼 수 없습니다.');
+      }
+      client.publish({
+        destination: SEND_DESTINATION,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ roomId: options.sessionId, clientMessageId, content })
+      });
+      return clientMessageId;
+    },
+    isConnected() {
+      return client.connected;
     }
   };
 }
 
-function adminSupportChatQueueSocketUrl() {
+function supportChatSocketUrl() {
   const base = API_BASE_URL || window.location.origin;
-  const url = new URL('/ws/admin/support-chat-queue', base);
+  const url = new URL(SUPPORT_CHAT_ENDPOINT, base);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   return url.toString();
+}
+
+function parseFrame<T>(frame: IMessage): T | null {
+  try {
+    return JSON.parse(frame.body) as T;
+  } catch {
+    return null;
+  }
 }

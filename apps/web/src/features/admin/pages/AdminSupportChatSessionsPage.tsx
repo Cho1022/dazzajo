@@ -5,13 +5,12 @@ import { CheckCircle2, Send } from 'lucide-react';
 import { AdminShell, DataTable, Panel, StateMessage } from '../../../components/ui';
 import { AUTH_CHANGED_EVENT, getCachedAuthUser } from '../../../lib/api';
 import { formatSeoulDateTime } from '../../../lib/dateTime';
-import { deleteAdminSupportChatSession, deleteAdminSupportChatVisitReservation, getAdminSupportChatSession, getAdminSupportChatSessions, openAdminSupportChatQueueSocket, openSupportChatSocket, postAdminSupportChatMessage, putAdminSupportChatVisitReservation, type SupportChatSocket } from '../../support/supportChatApi';
+import { deleteAdminSupportChatSession, deleteAdminSupportChatVisitReservation, getAdminSupportChatSession, getAdminSupportChatSessions, openAdminSupportChatQueueSocket, openSupportChatSocket, roomSummaryToContact, putAdminSupportChatVisitReservation, type SupportChatMessageEvent, type SupportChatSocket } from '../../support/supportChatApi';
 import { SupportChatMessageContent } from '../../support/SupportChatMessageContent';
 import { KoreanStatusBadge } from '../adminDisplay';
 import type { SupportChatContact, SupportChatMessage, SupportChatSessionDto, SupportChatSessionListDto, VisitSupportReservation } from '../../support/types';
 
 const DEFAULT_POLL_MS = 5000;
-const SOCKET_RECONNECT_DELAYS_MS = [1000, 2000, 5000, 10000];
 export type SocketStatus = 'polling' | 'connecting' | 'reconnecting' | 'connected' | 'disconnected';
 
 export function AdminSupportChatSessionsPage() {
@@ -38,7 +37,9 @@ export function AdminSupportChatSessionsPage() {
   const listQuery = useQuery({
     queryKey: ['admin-support-chat-sessions', authScope],
     queryFn: getAdminSupportChatSessions,
-    refetchInterval: (query) => pollingInterval(query.state.data as SupportChatSessionListDto | undefined),
+    refetchInterval: (query) => queueSocketStatus === 'connected'
+      ? false
+      : pollingInterval(query.state.data as SupportChatSessionListDto | undefined),
     retry: false
   });
   const rooms = listQuery.data?.items ?? [];
@@ -54,7 +55,9 @@ export function AdminSupportChatSessionsPage() {
     queryKey: ['admin-support-chat-session', authScope, selectedSessionId, selectedSessionMarkRead],
     queryFn: () => getAdminSupportChatSession(selectedSessionId as string, selectedSessionMarkRead),
     enabled: Boolean(selectedSessionId),
-    refetchInterval: (query) => selectedSessionId ? pollingInterval(query.state.data as SupportChatSessionDto | undefined) : false,
+    refetchInterval: (query) => selectedSessionId && socketStatus !== 'connected'
+      ? pollingInterval(query.state.data as SupportChatSessionDto | undefined)
+      : false,
     retry: false
   });
 
@@ -91,47 +94,23 @@ export function AdminSupportChatSessionsPage() {
       return undefined;
     }
     let disposed = false;
-    let reconnectTimer: ReturnType<typeof window.setTimeout> | null = null;
-    let reconnectAttempt = 0;
-    let activeConnectionId = 0;
-
-    const clearReconnectTimer = () => {
-      if (reconnectTimer !== null) {
-        window.clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-      }
-    };
-    const scheduleReconnect = () => {
-      if (disposed) return;
-      if (reconnectTimer !== null) return;
-      setQueueSocketStatus('reconnecting');
-      const delay = SOCKET_RECONNECT_DELAYS_MS[Math.min(reconnectAttempt, SOCKET_RECONNECT_DELAYS_MS.length - 1)];
-      reconnectAttempt += 1;
-      reconnectTimer = window.setTimeout(() => {
-        reconnectTimer = null;
-        connect();
-      }, delay);
-    };
     const connect = async () => {
       if (disposed) return;
-      const connectionId = ++activeConnectionId;
-      setQueueSocketStatus(reconnectAttempt > 0 ? 'reconnecting' : 'connecting');
+      setQueueSocketStatus('connecting');
       try {
         const socket = await openAdminSupportChatQueueSocket({
           onOpen: () => {
-            if (disposed || activeConnectionId !== connectionId) return;
-            reconnectAttempt = 0;
+            if (disposed) return;
             setQueueSocketStatus('connected');
+            void queryClient.invalidateQueries({ queryKey: ['admin-support-chat-sessions', authScope] });
           },
           onClose: () => {
-            if (disposed || activeConnectionId !== connectionId) return;
-            queueSocketRef.current = null;
-            scheduleReconnect();
+            if (disposed) return;
+            setQueueSocketStatus('reconnecting');
           },
           onError: () => {
-            if (disposed || activeConnectionId !== connectionId) return;
-            setQueueSocketStatus('disconnected');
-            scheduleReconnect();
+            if (disposed) return;
+            setQueueSocketStatus('reconnecting');
           },
           onSocketError: (error) => {
             if (error.message) {
@@ -151,7 +130,7 @@ export function AdminSupportChatSessionsPage() {
             );
           }
         });
-        if (disposed || activeConnectionId !== connectionId) {
+        if (disposed) {
           socket?.close();
           return;
         }
@@ -160,16 +139,14 @@ export function AdminSupportChatSessionsPage() {
           setQueueSocketStatus('polling');
         }
       } catch (error) {
-        if (disposed || activeConnectionId !== connectionId) return;
+        if (disposed) return;
         setQueueSocketStatus('disconnected');
-        scheduleReconnect();
       }
     };
 
     connect();
     return () => {
       disposed = true;
-      clearReconnectTimer();
       queueSocketRef.current?.close();
       queueSocketRef.current = null;
       setQueueSocketStatus('polling');
@@ -184,61 +161,55 @@ export function AdminSupportChatSessionsPage() {
       return undefined;
     }
     let disposed = false;
-    let reconnectTimer: ReturnType<typeof window.setTimeout> | null = null;
-    let reconnectAttempt = 0;
-    let activeConnectionId = 0;
-
-    const clearReconnectTimer = () => {
-      if (reconnectTimer !== null) {
-        window.clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-      }
-    };
-    const scheduleReconnect = () => {
-      if (disposed) return;
-      if (reconnectTimer !== null) return;
-      setSocketStatus('reconnecting');
-      const delay = SOCKET_RECONNECT_DELAYS_MS[Math.min(reconnectAttempt, SOCKET_RECONNECT_DELAYS_MS.length - 1)];
-      reconnectAttempt += 1;
-      reconnectTimer = window.setTimeout(() => {
-        reconnectTimer = null;
-        connect();
-      }, delay);
-    };
     const connect = async () => {
       if (disposed) return;
-      const connectionId = ++activeConnectionId;
-      setSocketStatus(reconnectAttempt > 0 ? 'reconnecting' : 'connecting');
+      setSocketStatus('connecting');
       try {
         const socket = await openSupportChatSocket({
           mode: 'admin',
           sessionId: selectedSessionId,
           onOpen: () => {
-            if (disposed || activeConnectionId !== connectionId) return;
-            reconnectAttempt = 0;
+            if (disposed) return;
             setSocketStatus('connected');
+            void queryClient.invalidateQueries({
+              queryKey: ['admin-support-chat-session', authScope, selectedSessionId]
+            });
           },
           onClose: () => {
-            if (disposed || activeConnectionId !== connectionId) return;
-            detailSocketRef.current = null;
-            scheduleReconnect();
+            if (disposed) return;
+            setSocketStatus('reconnecting');
           },
           onError: () => {
-            if (disposed || activeConnectionId !== connectionId) return;
-            setSocketStatus('disconnected');
-            scheduleReconnect();
+            if (disposed) return;
+            setSocketStatus('reconnecting');
           },
           onSocketError: (error) => {
             if (error.message) {
               setSendError(error.message);
             }
+            if (error.clientMessageId) {
+              markAdminMessageFailed(queryClient, authScope, error.clientMessageId);
+            }
           },
-          onDetail: (detail) => {
+          onMessage: (event) => {
             wasAtBottomRef.current = isNearBottom(messagesRef.current);
-            cacheDetail(queryClient, authScope, detail);
+            cacheAdminMessageEvent(queryClient, authScope, event);
+          },
+          onRoom: (event) => {
+            if (event.room) {
+              queryClient.setQueryData<SupportChatSessionListDto | undefined>(
+                ['admin-support-chat-sessions', authScope],
+                (existing) => patchAdminList(existing, roomSummaryToContact(event.room!))
+              );
+            }
+            if (event.refreshRequired) {
+              void queryClient.invalidateQueries({
+                queryKey: ['admin-support-chat-session', authScope, selectedSessionId]
+              });
+            }
           }
         });
-        if (disposed || activeConnectionId !== connectionId) {
+        if (disposed) {
           socket?.close();
           return;
         }
@@ -247,35 +218,19 @@ export function AdminSupportChatSessionsPage() {
           setSocketStatus('polling');
         }
       } catch (error) {
-        if (disposed || activeConnectionId !== connectionId) return;
+        if (disposed) return;
         setSocketStatus('disconnected');
-        scheduleReconnect();
       }
     };
 
     connect();
     return () => {
       disposed = true;
-      clearReconnectTimer();
       detailSocketRef.current?.close();
       detailSocketRef.current = null;
       setSocketStatus('polling');
     };
   }, [authScope, selectedSessionId, queryClient]);
-
-  const sendMutation = useMutation({
-    mutationFn: (content: string) => postAdminSupportChatMessage(selectedSessionId as string, content),
-    onSuccess: (detail) => {
-      forceScrollToBottomRef.current = true;
-      setMessage('');
-      setSendError(null);
-      cacheDetail(queryClient, authScope, detail);
-      void listQuery.refetch();
-    },
-    onError: (error) => {
-      setSendError(errorMessage(error));
-    }
-  });
 
   const scheduleVisitMutation = useMutation({
     mutationFn: () => putAdminSupportChatVisitReservation(selectedSessionId as string, {
@@ -328,7 +283,7 @@ export function AdminSupportChatSessionsPage() {
 
   const selectedRoom = detailQuery.data?.contact ?? rooms.find((room) => room.id === selectedSessionId) ?? null;
   const messages = detailQuery.data?.messages ?? [];
-  const canSend = Boolean(selectedSessionId && selectedRoom?.canSendMessage && message.trim() && !sendMutation.isPending);
+  const canSend = Boolean(selectedSessionId && selectedRoom?.canSendMessage && message.trim() && socketStatus === 'connected');
   const canScheduleVisit = Boolean(selectedSessionId && selectedRoom?.canSendMessage && visitScheduledAt && !scheduleVisitMutation.isPending);
   const canCancelVisit = Boolean(selectedSessionId && selectedRoom?.canSendMessage && selectedRoom?.visitReservation && selectedRoom.visitReservation.status !== 'CANCELLED' && !cancelVisitMutation.isPending);
   const canDeleteSession = Boolean(selectedSessionId && selectedRoom?.status === 'ACTIVE' && !deleteSessionMutation.isPending);
@@ -379,9 +334,18 @@ export function AdminSupportChatSessionsPage() {
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    if (!canSend) return;
-    setSendError(null);
-    sendMutation.mutate(message.trim());
+    if (!canSend || !selectedSessionId) return;
+    const outgoing = message.trim();
+    try {
+      const clientMessageId = crypto.randomUUID();
+      appendAdminOptimisticMessage(queryClient, authScope, selectedSessionId, clientMessageId, outgoing);
+      detailSocketRef.current?.sendMessage(outgoing, clientMessageId);
+      forceScrollToBottomRef.current = true;
+      setMessage('');
+      setSendError(null);
+    } catch (error) {
+      setSendError(errorMessage(error));
+    }
   }
 
   function submitVisitReservation(event: FormEvent) {
@@ -582,7 +546,7 @@ export function AdminSupportChatSessionsPage() {
                         className="inline-flex h-11 min-w-28 shrink-0 items-center justify-center gap-1 rounded-md bg-brand-blue px-4 text-sm font-black text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-400"
                       >
                         <Send size={14} />
-                        {sendMutation.isPending ? '전송 중' : '답변 전송'}
+                        답변 전송
                       </button>
                     </div>
                     <div className="flex items-center justify-between text-[11px]">
@@ -728,6 +692,89 @@ function cacheDetail(queryClient: ReturnType<typeof useQueryClient>, authScope: 
       (existing) => patchAdminList(existing, detail.contact as SupportChatContact)
     );
   }
+}
+
+function cacheAdminMessageEvent(
+  queryClient: ReturnType<typeof useQueryClient>,
+  authScope: string,
+  event: SupportChatMessageEvent
+) {
+  queryClient.setQueriesData<SupportChatSessionDto | undefined>(
+    { queryKey: ['admin-support-chat-session', authScope, event.roomId] },
+    (existing) => patchAdminMessageEvent(existing, event)
+  );
+  queryClient.setQueryData<SupportChatSessionListDto | undefined>(
+    ['admin-support-chat-sessions', authScope],
+    (existing) => patchAdminList(existing, roomSummaryToContact(event.room))
+  );
+}
+
+function patchAdminMessageEvent(existing: SupportChatSessionDto | undefined, event: SupportChatMessageEvent) {
+  if (!existing) return existing;
+  const canonical: SupportChatMessage = {
+    id: event.messageId,
+    clientMessageId: event.clientMessageId,
+    role: event.senderRole,
+    content: event.content,
+    senderId: event.senderId,
+    senderName: event.senderName,
+    createdAt: event.createdAt,
+    pending: false,
+    failed: false
+  };
+  const duplicateIndex = existing.messages.findIndex((item) =>
+    item.id === event.messageId || Boolean(event.clientMessageId && item.clientMessageId === event.clientMessageId)
+  );
+  const messages = duplicateIndex >= 0
+    ? existing.messages.map((item, index) => index === duplicateIndex ? canonical : item)
+    : [...existing.messages, canonical];
+  const summary = roomSummaryToContact(event.room);
+  return {
+    ...existing,
+    contact: existing.contact
+      ? { ...existing.contact, ...summary, visitReservation: existing.contact.visitReservation }
+      : summary,
+    messages
+  };
+}
+
+function appendAdminOptimisticMessage(
+  queryClient: ReturnType<typeof useQueryClient>,
+  authScope: string,
+  sessionId: string,
+  clientMessageId: string,
+  content: string
+) {
+  const optimistic: SupportChatMessage = {
+    id: `optimistic:${clientMessageId}`,
+    clientMessageId,
+    role: 'ADMIN',
+    content,
+    createdAt: new Date().toISOString(),
+    pending: true
+  };
+  queryClient.setQueriesData<SupportChatSessionDto | undefined>(
+    { queryKey: ['admin-support-chat-session', authScope, sessionId] },
+    (existing) => existing ? { ...existing, messages: [...existing.messages, optimistic] } : existing
+  );
+}
+
+function markAdminMessageFailed(
+  queryClient: ReturnType<typeof useQueryClient>,
+  authScope: string,
+  clientMessageId: string
+) {
+  queryClient.setQueriesData<SupportChatSessionDto | undefined>(
+    { queryKey: ['admin-support-chat-session', authScope] },
+    (existing) => existing
+      ? {
+          ...existing,
+          messages: existing.messages.map((item) => item.clientMessageId === clientMessageId
+            ? { ...item, pending: false, failed: true }
+            : item)
+        }
+      : existing
+  );
 }
 
 function patchAdminList(existing: SupportChatSessionListDto | undefined, contact: SupportChatContact) {
