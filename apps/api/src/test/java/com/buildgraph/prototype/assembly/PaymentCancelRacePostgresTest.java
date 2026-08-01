@@ -2,14 +2,25 @@ package com.buildgraph.prototype.assembly;
 
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
+import com.buildgraph.prototype.build.BuildGraphService;
+import com.buildgraph.prototype.common.ApiException;
+import com.buildgraph.prototype.quote.QuoteDraftQueryService;
+import com.buildgraph.prototype.user.CurrentUserService;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.OffsetDateTime;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -19,217 +30,228 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.TransactionTemplate;
 
 @Tag("postgres-integration")
 class PaymentCancelRacePostgresTest {
     private static final long TIMEOUT_SECONDS = 10;
 
     @Test
-    void reproducesCancelledRequestWithPaidSucceededAttempt() throws Exception {
+    void requestCancellationLockWinsAndPaymentCompletionReturnsConflict() throws Exception {
         requirePostgresRaceTest();
 
         Fixture fixture = createFixture();
-        CountDownLatch aReady = new CountDownLatch(1);
-        CountDownLatch releaseA = new CountDownLatch(1);
+        PaidGateway gateway = new PaidGateway();
+        ServiceHarness services = serviceHarness(fixture, gateway);
+        CountDownLatch requestLocked = new CountDownLatch(1);
+        CountDownLatch releaseCancellation = new CountDownLatch(1);
+        CountDownLatch completionStarted = new CountDownLatch(1);
         ExecutorService executor = Executors.newFixedThreadPool(2);
-        Future<CancelUpdates> cancelFuture = null;
-        Future<PaymentUpdates> paymentFuture = null;
+        Future<Map<String, Object>> cancellationFuture = null;
+        Future<OperationResult> completionFuture = null;
         try {
-            cancelFuture = executor.submit(() -> runCancellation(fixture, aReady, releaseA));
-            await(aReady, "transaction A did not reach the payment read");
+            cancellationFuture = executor.submit(() -> services.transactionTemplate().execute(status -> {
+                services.jdbcTemplate().queryForObject(
+                        "SELECT id FROM assembly_requests WHERE id = ? FOR UPDATE",
+                        Long.class,
+                        fixture.requestId()
+                );
+                requestLocked.countDown();
+                awaitUnchecked(releaseCancellation, "cancellation transaction was not released");
+                return services.brokerageService().cancelForUser(
+                        "Bearer user", fixture.requestPublicId(), Map.of("reason", "race regression")
+                );
+            }));
+            await(requestLocked, "cancellation transaction did not lock the request");
 
-            paymentFuture = executor.submit(() -> runPaymentCompletion(fixture));
-            PaymentUpdates paymentUpdates = paymentFuture.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
-            logPaymentUpdates(paymentUpdates);
+            completionFuture = executor.submit(() -> {
+                completionStarted.countDown();
+                try {
+                    return new OperationResult(
+                            services.paymentService().completeAttempt("Bearer user", fixture.attemptPublicId()),
+                            null
+                    );
+                } catch (Throwable error) {
+                    return new OperationResult(null, error);
+                }
+            });
+            await(completionStarted, "payment completion did not start");
+            releaseCancellation.countDown();
 
-            releaseA.countDown();
-
-            CancelUpdates cancelUpdates = cancelFuture.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
-            logCancelUpdates(cancelUpdates);
+            Map<String, Object> cancellation = cancellationFuture.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            OperationResult completion = completionFuture.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            assertEquals("CANCELLED", cancellation.get("status"));
+            assertConflict(completion.error());
 
             FinalState finalState = readFinalState(fixture);
-            logFinalState(finalState);
-
-            // 취소는 Request만 잠그고 결제 완료는 Payment와 Attempt만 잠그므로 두 트랜잭션이
-            // 서로를 기다리지 않고 모두 커밋할 수 있다. 취소의 PENDING Payment 조건부 UPDATE가
-            // 0행이어도 결과를 확인하지 않아 Request만 CANCELLED로 남는 비즈니스 불변조건 위반이다.
+            logFinalState("cancellation wins", finalState);
             assertAll(
                     () -> assertEquals("CANCELLED", finalState.requestStatus()),
-                    () -> assertEquals("PAID", finalState.paymentStatus()),
-                    () -> assertEquals("SUCCEEDED", finalState.attemptStatus()),
-                    () -> assertNull(finalState.refundedAt())
+                    () -> assertEquals("CANCELLED", finalState.paymentStatus()),
+                    () -> assertEquals("CANCELLED", finalState.attemptStatus()),
+                    () -> assertNull(finalState.paidAt()),
+                    () -> assertNull(finalState.refundedAt()),
+                    () -> assertEquals(1L, finalState.cancelledHistoryCount()),
+                    () -> assertEquals(0L, finalState.refundRecordCount()),
+                    () -> assertEquals(0, gateway.verifyCalls()),
+                    () -> assertFalse(isForbiddenCombination(finalState))
             );
         } finally {
-            // 테스트가 실패해도 A와 executor가 남지 않게 하는 안전 해제다.
-            releaseA.countDown();
-            waitForCompletion(cancelFuture);
-            waitForCompletion(paymentFuture);
-            executor.shutdownNow();
-            executor.awaitTermination(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            releaseCancellation.countDown();
+            waitForCompletion(cancellationFuture);
+            waitForCompletion(completionFuture);
+            shutdown(executor);
             deleteFixture(fixture);
         }
     }
 
-    private static CancelUpdates runCancellation(
-            Fixture fixture,
-            CountDownLatch aReady,
-            CountDownLatch releaseA
-    ) throws Exception {
-        try (Connection connection = openConnection()) {
-            connection.setAutoCommit(false);
-            connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
-            try {
-                try (PreparedStatement statement = connection.prepareStatement("""
-                        SELECT id
-                        FROM assembly_requests
-                        WHERE id = ? AND user_id = ?
-                        FOR UPDATE
-                        """)) {
-                    statement.setLong(1, fixture.requestId());
-                    statement.setLong(2, fixture.userId());
-                    try (ResultSet rows = statement.executeQuery()) {
-                        requireRow(rows, "transaction A could not lock the request");
-                    }
+    @Test
+    void verifyingAttemptMakesUserCancellationReturnConflict() throws Exception {
+        requirePostgresRaceTest();
+
+        Fixture fixture = createFixture();
+        BlockingPaidGateway gateway = new BlockingPaidGateway();
+        ServiceHarness services = serviceHarness(fixture, gateway);
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        Future<OperationResult> completionFuture = null;
+        try {
+            completionFuture = executor.submit(() -> {
+                try {
+                    return new OperationResult(
+                            services.paymentService().completeAttempt("Bearer user", fixture.attemptPublicId()),
+                            null
+                    );
+                } catch (Throwable error) {
+                    return new OperationResult(null, error);
                 }
+            });
+            await(gateway.verificationStarted(), "payment verification did not start");
+            assertEquals("VERIFYING", readFinalState(fixture).attemptStatus());
 
-                String paymentStatus;
-                try (PreparedStatement statement = connection.prepareStatement("""
-                        SELECT status
-                        FROM assembly_payments
-                        WHERE assembly_request_id = ?
-                        """)) {
-                    statement.setLong(1, fixture.requestId());
-                    try (ResultSet rows = statement.executeQuery()) {
-                        requireRow(rows, "transaction A could not read the payment");
-                        paymentStatus = rows.getString("status");
-                    }
-                }
-                requireState("PENDING", paymentStatus, "transaction A initial payment status");
+            ApiException cancellationError = assertThrows(ApiException.class, () ->
+                    services.transactionTemplate().execute(status -> services.brokerageService().cancelForUser(
+                            "Bearer user", fixture.requestPublicId(), Map.of("reason", "too late")
+                    ))
+            );
+            assertConflict(cancellationError);
 
-                aReady.countDown();
-                await(releaseA, "transaction A was not released after transaction B committed");
+            gateway.releaseVerification();
+            OperationResult completion = completionFuture.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            assertNull(completion.error());
+            assertNotNull(completion.response());
+            assertEquals("SUCCEEDED", completion.response().get("status"));
 
-                int requestCancelled;
-                try (PreparedStatement statement = connection.prepareStatement("""
-                        UPDATE assembly_requests
-                        SET status = 'CANCELLED', cancellation_reason = ?,
-                            cancelled_at = now(), updated_at = now()
-                        WHERE id = ?
-                        """)) {
-                    statement.setString(1, "payment-cancel race reproduction");
-                    statement.setLong(2, fixture.requestId());
-                    requestCancelled = statement.executeUpdate();
-                }
-
-                int attemptsCancelled;
-                try (PreparedStatement statement = connection.prepareStatement("""
-                        UPDATE assembly_payment_attempts
-                        SET status = 'CANCELLED', failure_code = 'ORDER_CANCELLED',
-                            failure_message = '조립 요청이 취소되었습니다.',
-                            completed_at = now(), updated_at = now()
-                        WHERE assembly_payment_id = (
-                            SELECT id FROM assembly_payments WHERE assembly_request_id = ?
-                        )
-                          AND status IN ('READY', 'PROCESSING', 'VERIFYING')
-                        """)) {
-                    statement.setLong(1, fixture.requestId());
-                    attemptsCancelled = statement.executeUpdate();
-                }
-
-                int paymentsCancelled;
-                try (PreparedStatement statement = connection.prepareStatement("""
-                        UPDATE assembly_payments
-                        SET status = 'CANCELLED', cancelled_at = now(), updated_at = now()
-                        WHERE assembly_request_id = ? AND status = 'PENDING'
-                        """)) {
-                    statement.setLong(1, fixture.requestId());
-                    paymentsCancelled = statement.executeUpdate();
-                }
-
-                int historiesInserted;
-                try (PreparedStatement statement = connection.prepareStatement("""
-                        INSERT INTO assembly_request_status_history (
-                            assembly_request_id, actor_user_id, from_status, to_status, note, created_at
-                        ) VALUES (?, ?, 'MATCHED', 'CANCELLED', ?, now())
-                        """)) {
-                    statement.setLong(1, fixture.requestId());
-                    statement.setLong(2, fixture.userId());
-                    statement.setString(3, "payment-cancel race reproduction");
-                    historiesInserted = statement.executeUpdate();
-                }
-
-                connection.commit();
-                return new CancelUpdates(
-                        requestCancelled,
-                        attemptsCancelled,
-                        paymentsCancelled,
-                        historiesInserted
-                );
-            } catch (Exception exception) {
-                connection.rollback();
-                throw exception;
-            }
+            FinalState finalState = readFinalState(fixture);
+            logFinalState("verification wins", finalState);
+            assertAll(
+                    () -> assertEquals("MATCHED", finalState.requestStatus()),
+                    () -> assertEquals("PAID", finalState.paymentStatus()),
+                    () -> assertEquals("SUCCEEDED", finalState.attemptStatus()),
+                    () -> assertNotNull(finalState.paidAt()),
+                    () -> assertNull(finalState.refundedAt()),
+                    () -> assertEquals(0L, finalState.cancelledHistoryCount()),
+                    () -> assertEquals(0L, finalState.refundRecordCount()),
+                    () -> assertFalse(isForbiddenCombination(finalState))
+            );
+        } finally {
+            gateway.releaseVerification();
+            waitForCompletion(completionFuture);
+            shutdown(executor);
+            deleteFixture(fixture);
         }
     }
 
-    private static PaymentUpdates runPaymentCompletion(Fixture fixture) throws Exception {
-        try (Connection connection = openConnection()) {
-            connection.setAutoCommit(false);
-            connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
-            try {
-                try (PreparedStatement statement = connection.prepareStatement("""
-                        SELECT apa.id, apa.status AS attempt_status,
-                               ap.id AS payment_id, ap.status AS payment_status
-                        FROM assembly_payment_attempts apa
-                        JOIN assembly_payments ap ON ap.id = apa.assembly_payment_id
-                        JOIN assembly_requests ar ON ar.id = ap.assembly_request_id
-                        WHERE apa.id = ? AND ar.user_id = ?
-                        FOR UPDATE OF apa, ap
-                        """)) {
-                    statement.setLong(1, fixture.attemptId());
-                    statement.setLong(2, fixture.userId());
-                    try (ResultSet rows = statement.executeQuery()) {
-                        requireRow(rows, "transaction B could not lock the attempt and payment");
-                        requireState("PROCESSING", rows.getString("attempt_status"),
-                                "transaction B initial attempt status");
-                        requireState("PENDING", rows.getString("payment_status"),
-                                "transaction B initial payment status");
-                    }
-                }
+    @Test
+    void normalPaymentEndsPaidAndSucceeded() throws Exception {
+        requirePostgresRaceTest();
 
-                int attemptsSucceeded;
-                try (PreparedStatement statement = connection.prepareStatement("""
-                        UPDATE assembly_payment_attempts
-                        SET status = 'SUCCEEDED', provider_transaction_id = ?, pg_transaction_id = ?,
-                            approved_amount = requested_amount, verified_at = now(), completed_at = now(),
-                            updated_at = now(), failure_code = NULL, failure_message = NULL
-                        WHERE id = ?
-                        """)) {
-                    statement.setString(1, "provider-" + fixture.marker());
-                    statement.setString(2, "pg-" + fixture.marker());
-                    statement.setLong(3, fixture.attemptId());
-                    attemptsSucceeded = statement.executeUpdate();
-                }
+        Fixture fixture = createFixture();
+        ServiceHarness services = serviceHarness(fixture, new PaidGateway());
+        try {
+            Map<String, Object> response = services.paymentService()
+                    .completeAttempt("Bearer user", fixture.attemptPublicId());
+            FinalState finalState = readFinalState(fixture);
+            logFinalState("normal payment", finalState);
 
-                int paymentsPaid;
-                try (PreparedStatement statement = connection.prepareStatement("""
-                        UPDATE assembly_payments
-                        SET provider = 'MOCK', method = 'CARD', currency = 'KRW',
-                            paid_amount = amount, status = 'PAID',
-                            paid_at = COALESCE(paid_at, now()), verified_at = now(), updated_at = now()
-                        WHERE id = ? AND status = 'PENDING'
-                        """)) {
-                    statement.setLong(1, fixture.paymentId());
-                    paymentsPaid = statement.executeUpdate();
-                }
-
-                connection.commit();
-                return new PaymentUpdates(attemptsSucceeded, paymentsPaid);
-            } catch (Exception exception) {
-                connection.rollback();
-                throw exception;
-            }
+            assertAll(
+                    () -> assertEquals("SUCCEEDED", response.get("status")),
+                    () -> assertEquals("MATCHED", finalState.requestStatus()),
+                    () -> assertEquals("PAID", finalState.paymentStatus()),
+                    () -> assertEquals("SUCCEEDED", finalState.attemptStatus()),
+                    () -> assertNotNull(finalState.paidAt()),
+                    () -> assertNull(finalState.refundedAt()),
+                    () -> assertFalse(isForbiddenCombination(finalState))
+            );
+        } finally {
+            deleteFixture(fixture);
         }
+    }
+
+    @Test
+    void normalCancellationEndsRequestPaymentAndAttemptCancelled() throws Exception {
+        requirePostgresRaceTest();
+
+        Fixture fixture = createFixture();
+        ServiceHarness services = serviceHarness(fixture, new PaidGateway());
+        try {
+            Map<String, Object> response = services.transactionTemplate().execute(status ->
+                    services.brokerageService().cancelForUser(
+                            "Bearer user", fixture.requestPublicId(), Map.of("reason", "normal cancellation")
+                    )
+            );
+            FinalState finalState = readFinalState(fixture);
+            logFinalState("normal cancellation", finalState);
+
+            assertAll(
+                    () -> assertNotNull(response),
+                    () -> assertEquals("CANCELLED", response.get("status")),
+                    () -> assertEquals("CANCELLED", finalState.requestStatus()),
+                    () -> assertEquals("CANCELLED", finalState.paymentStatus()),
+                    () -> assertEquals("CANCELLED", finalState.attemptStatus()),
+                    () -> assertNull(finalState.paidAt()),
+                    () -> assertNull(finalState.refundedAt()),
+                    () -> assertEquals(1L, finalState.cancelledHistoryCount()),
+                    () -> assertEquals(0L, finalState.refundRecordCount()),
+                    () -> assertFalse(isForbiddenCombination(finalState))
+            );
+        } finally {
+            deleteFixture(fixture);
+        }
+    }
+
+    private static ServiceHarness serviceHarness(Fixture fixture, PaymentGateway gateway) {
+        DriverManagerDataSource dataSource = new DriverManagerDataSource(
+                databaseUrl(), databaseUsername(), databasePassword()
+        );
+        JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
+        TransactionTemplate transactionTemplate = new TransactionTemplate(
+                new DataSourceTransactionManager(dataSource)
+        );
+        CurrentUserService currentUserService = mock(CurrentUserService.class);
+        when(currentUserService.requireUser("Bearer user")).thenReturn(new CurrentUserService.CurrentUser(
+                fixture.userId(), "race-user", "user@example.com", "Race User", "USER", null
+        ));
+        AssemblyPaymentService paymentService = new AssemblyPaymentService(
+                jdbcTemplate,
+                currentUserService,
+                gateway,
+                mock(MockPaymentGateway.class),
+                transactionTemplate,
+                new ObjectMapper(),
+                "race-secret"
+        );
+        AssemblyBrokerageService brokerageService = new AssemblyBrokerageService(
+                jdbcTemplate,
+                currentUserService,
+                mock(QuoteDraftQueryService.class),
+                mock(BuildGraphService.class),
+                mock(BuildGraphPointService.class)
+        );
+        return new ServiceHarness(jdbcTemplate, transactionTemplate, paymentService, brokerageService);
     }
 
     private static Fixture createFixture() throws Exception {
@@ -287,7 +309,6 @@ class PaymentCancelRacePostgresTest {
                         offerId = rows.getLong("id");
                     }
                 }
-
                 try (PreparedStatement statement = connection.prepareStatement(
                         "UPDATE assembly_requests SET selected_offer_id = ? WHERE id = ?")) {
                     statement.setLong(1, offerId);
@@ -312,6 +333,8 @@ class PaymentCancelRacePostgresTest {
                 }
 
                 long attemptId;
+                String attemptPublicId;
+                String merchantPaymentId = "BG-RACE-" + marker;
                 try (PreparedStatement statement = connection.prepareStatement("""
                         INSERT INTO assembly_payment_attempts (
                             assembly_payment_id, idempotency_key, provider, merchant_payment_id,
@@ -319,14 +342,15 @@ class PaymentCancelRacePostgresTest {
                             created_at, updated_at
                         ) VALUES (?, ?, 'MOCK', ?, 'CARD', 110000, 'KRW', 'PROCESSING',
                                   now() + interval '30 minutes', now(), now())
-                        RETURNING id
+                        RETURNING id, public_id::text
                         """)) {
                     statement.setLong(1, paymentId);
                     statement.setString(2, "race-attempt-" + marker);
-                    statement.setString(3, "BG-RACE-" + marker);
+                    statement.setString(3, merchantPaymentId);
                     try (ResultSet rows = statement.executeQuery()) {
                         requireRow(rows, "payment attempt fixture was not inserted");
                         attemptId = rows.getLong("id");
+                        attemptPublicId = rows.getString("public_id");
                     }
                 }
 
@@ -341,7 +365,10 @@ class PaymentCancelRacePostgresTest {
                 }
 
                 connection.commit();
-                return new Fixture(marker, userId, requestId, requestPublicId, offerId, paymentId, attemptId);
+                return new Fixture(
+                        marker, userId, requestId, requestPublicId, offerId, paymentId,
+                        attemptId, attemptPublicId, merchantPaymentId
+                );
             } catch (Exception exception) {
                 connection.rollback();
                 throw exception;
@@ -415,14 +442,22 @@ class PaymentCancelRacePostgresTest {
     }
 
     private static Connection openConnection() throws SQLException {
-        return DriverManager.getConnection(
-                environment("PAYMENT_CANCEL_RACE_DB_URL",
-                        environment("SPRING_DATASOURCE_URL", "jdbc:postgresql://localhost:55432/buildgraph")),
-                environment("PAYMENT_CANCEL_RACE_DB_USERNAME",
-                        environment("SPRING_DATASOURCE_USERNAME", "buildgraph")),
-                environment("PAYMENT_CANCEL_RACE_DB_PASSWORD",
-                        environment("SPRING_DATASOURCE_PASSWORD", "buildgraph"))
-        );
+        return DriverManager.getConnection(databaseUrl(), databaseUsername(), databasePassword());
+    }
+
+    private static String databaseUrl() {
+        return environment("PAYMENT_CANCEL_RACE_DB_URL",
+                environment("SPRING_DATASOURCE_URL", "jdbc:postgresql://localhost:55432/buildgraph"));
+    }
+
+    private static String databaseUsername() {
+        return environment("PAYMENT_CANCEL_RACE_DB_USERNAME",
+                environment("SPRING_DATASOURCE_USERNAME", "buildgraph"));
+    }
+
+    private static String databasePassword() {
+        return environment("PAYMENT_CANCEL_RACE_DB_PASSWORD",
+                environment("SPRING_DATASOURCE_PASSWORD", "buildgraph"));
     }
 
     private static void requirePostgresRaceTest() {
@@ -446,15 +481,32 @@ class PaymentCancelRacePostgresTest {
         }
     }
 
-    private static void requireState(String expected, String actual, String label) {
-        if (!expected.equals(actual)) {
-            throw new IllegalStateException(label + ": expected=" + expected + ", actual=" + actual);
-        }
+    private static void assertConflict(Throwable error) {
+        assertNotNull(error);
+        assertEquals(ApiException.class, error.getClass());
+        ApiException apiException = (ApiException) error;
+        assertAll(
+                () -> assertEquals(HttpStatus.CONFLICT, apiException.status()),
+                () -> assertEquals("CONFLICT_STATE", apiException.code())
+        );
+    }
+
+    private static boolean isForbiddenCombination(FinalState state) {
+        return "CANCELLED".equals(state.requestStatus()) && "PAID".equals(state.paymentStatus());
     }
 
     private static void await(CountDownLatch latch, String message) throws InterruptedException {
         if (!latch.await(TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
             throw new IllegalStateException(message);
+        }
+    }
+
+    private static void awaitUnchecked(CountDownLatch latch, String message) {
+        try {
+            await(latch, message);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(message, exception);
         }
     }
 
@@ -469,34 +521,21 @@ class PaymentCancelRacePostgresTest {
         }
     }
 
+    private static void shutdown(ExecutorService executor) throws InterruptedException {
+        executor.shutdownNow();
+        executor.awaitTermination(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+    }
+
     private static String environment(String name, String defaultValue) {
         String value = System.getenv(name);
         return value == null || value.isBlank() ? defaultValue : value;
     }
 
-    private static void logPaymentUpdates(PaymentUpdates updates) {
+    private static void logFinalState(String scenario, FinalState state) {
         System.out.printf(
-                "Transaction B updates: attempt SUCCEEDED=%d, payment PAID=%d%n",
-                updates.attemptsSucceeded(),
-                updates.paymentsPaid()
-        );
-    }
-
-    private static void logCancelUpdates(CancelUpdates updates) {
-        System.out.printf(
-                "Transaction A updates: request CANCELLED=%d, active attempt CANCELLED=%d, "
-                        + "pending payment CANCELLED=%d, history inserted=%d%n",
-                updates.requestCancelled(),
-                updates.attemptsCancelled(),
-                updates.paymentsCancelled(),
-                updates.historiesInserted()
-        );
-    }
-
-    private static void logFinalState(FinalState state) {
-        System.out.printf(
-                "Final state: request=%s, payment=%s, attempt=%s, paid_at=%s, refunded_at=%s, "
+                "%s: request=%s, payment=%s, attempt=%s, paid_at=%s, refunded_at=%s, "
                         + "cancelled_history=%d, refund_records=%d%n",
+                scenario,
                 state.requestStatus(),
                 state.paymentStatus(),
                 state.attemptStatus(),
@@ -507,6 +546,72 @@ class PaymentCancelRacePostgresTest {
         );
     }
 
+    private static class PaidGateway implements PaymentGateway {
+        private int verifyCalls;
+
+        @Override
+        public String provider() {
+            return "MOCK";
+        }
+
+        @Override
+        public CheckoutSession createCheckout(CheckoutRequest request) {
+            throw new UnsupportedOperationException("not used in this test");
+        }
+
+        @Override
+        public VerificationResult verify(String merchantPaymentId) {
+            verifyCalls += 1;
+            return new VerificationResult(
+                    VerificationStatus.PAID,
+                    "provider-" + merchantPaymentId,
+                    "pg-" + merchantPaymentId,
+                    merchantPaymentId,
+                    110_000L,
+                    "KRW",
+                    "CARD",
+                    null,
+                    null,
+                    null
+            );
+        }
+
+        int verifyCalls() {
+            return verifyCalls;
+        }
+    }
+
+    private static final class BlockingPaidGateway extends PaidGateway {
+        private final CountDownLatch verificationStarted = new CountDownLatch(1);
+        private final CountDownLatch releaseVerification = new CountDownLatch(1);
+
+        @Override
+        public VerificationResult verify(String merchantPaymentId) {
+            verificationStarted.countDown();
+            awaitUnchecked(releaseVerification, "payment verification was not released");
+            return super.verify(merchantPaymentId);
+        }
+
+        CountDownLatch verificationStarted() {
+            return verificationStarted;
+        }
+
+        void releaseVerification() {
+            releaseVerification.countDown();
+        }
+    }
+
+    private record ServiceHarness(
+            JdbcTemplate jdbcTemplate,
+            TransactionTemplate transactionTemplate,
+            AssemblyPaymentService paymentService,
+            AssemblyBrokerageService brokerageService
+    ) {
+    }
+
+    private record OperationResult(Map<String, Object> response, Throwable error) {
+    }
+
     private record Fixture(
             String marker,
             long userId,
@@ -514,18 +619,9 @@ class PaymentCancelRacePostgresTest {
             String requestPublicId,
             long offerId,
             long paymentId,
-            long attemptId
-    ) {
-    }
-
-    private record PaymentUpdates(int attemptsSucceeded, int paymentsPaid) {
-    }
-
-    private record CancelUpdates(
-            int requestCancelled,
-            int attemptsCancelled,
-            int paymentsCancelled,
-            int historiesInserted
+            long attemptId,
+            String attemptPublicId,
+            String merchantPaymentId
     ) {
     }
 
