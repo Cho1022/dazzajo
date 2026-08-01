@@ -798,42 +798,16 @@ echo 'PASS: Green CloudFront logout'
 
 WebSocket은 HTTP/1.1 upgrade로 동작한다. `/ws/*`가 S3로 가지 않고 Green Nginx로 전달되는지 확인한다.
 
-1. 관리자 계정으로 로그인하고 queue ticket을 발급한다.
-
-```bash
-curl -fsS \
-  -X POST "https://$CF_DOMAIN/api/auth/login" \
-  -H 'Content-Type: application/json' \
-  --data '{"email":"admin@example.com","password":"passw0rd!"}' \
-  > "$PHASE7_SMOKE_DIR/admin-login.json"
-
-export ADMIN_ACCESS_TOKEN="$(jq -er '.accessToken' "$PHASE7_SMOKE_DIR/admin-login.json")"
-
-curl -fsS \
-  -X POST "https://$CF_DOMAIN/api/admin/support/chat-sessions/ws-ticket" \
-  -H "Authorization: Bearer $ADMIN_ACCESS_TOKEN" \
-  > "$PHASE7_SMOKE_DIR/ws-ticket.json"
-
-jq . "$PHASE7_SMOKE_DIR/ws-ticket.json"
-```
-
-2. `ticket` 값을 화면에 공개하지 말고 본인 터미널에서만 사용한다.
-3. 로컬에 `wscat`이 있으면 다음처럼 접속한다.
-
-```bash
-npx wscat -c "wss://$CF_DOMAIN/ws/admin/support-chat-queue"
-```
-
-4. 연결 후 5초 안에 아래 JSON의 `<TICKET>`을 실제 일회용 ticket으로 바꿔 입력한다.
-
-```json
-{"type":"AUTH","ticket":"<TICKET>"}
-```
+1. 관리자 계정으로 브라우저 로그인 후 `/admin/support-chat-sessions`를 연다.
+2. 개발자 도구 `Network → WS`에서 `wss://$CF_DOMAIN/ws/support-chat` 연결을 선택한다.
+3. STOMP CONNECT frame의 native `Authorization` header가 전송되고 `CONNECTED` frame을 받는지 확인한다. 토큰 값 자체는 캡처나 문서에 남기지 않는다.
+4. `/topic/support-chat/admin-queue`, 선택한 방의 `/topic/support-chat/rooms/{roomId}`, `/user/queue/support-chat-errors` SUBSCRIBE frame을 확인한다.
+5. 테스트 메시지를 보내 `/app/support-chat/messages` SEND와 `MESSAGE_CREATED` 수신을 확인한다.
 
 통과 기준:
 
 - handshake가 `101 Switching Protocols`로 연결된다.
-- `SUPPORT_CHAT_QUEUE_READY` 계열 메시지를 받는다.
+- STOMP `CONNECTED`와 관리자 queue의 `ROOM_UPDATED` 또는 `ROOM_REMOVED` event를 받는다.
 - `403`, `502`, timeout이면 `/ws/*` behavior와 `AllViewer`, Green Nginx upgrade 설정을 확인한다.
 
 ## 20. 브라우저·Google OAuth 검증

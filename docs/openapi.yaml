@@ -4155,38 +4155,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
-  /api/support/chat-sessions/{id}/messages:
-    post:
-      summary: 사용자 상담 메시지 전송
-      security:
-        - bearerAuth: []
-      parameters:
-        - $ref: "#/components/parameters/PublicId"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/SupportChatMessageRequest"
-      responses:
-        "200":
-          description: 메시지 전송 후 갱신된 상담방 상세
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SupportChatSessionDto"
-        "400":
-          description: 메시지 내용 누락 또는 2000자 초과
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "409":
-          description: 종료된 AS 티켓 상담방
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
   /api/support/chat-sessions/{id}/visit-reservation:
     put:
       summary: 사용자 방문 지원 예약 요청
@@ -4222,33 +4190,6 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "409":
           description: 종료된 AS 티켓 상담방
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-  /api/support/chat-sessions/{id}/ws-ticket:
-    post:
-      summary: 사용자 상담방 WebSocket ticket 발급
-      description: WebSocket URL에 JWT를 싣지 않기 위해 60초 TTL, 1회 사용 ticket을 발급한다.
-      security:
-        - bearerAuth: []
-      parameters:
-        - $ref: "#/components/parameters/PublicId"
-      responses:
-        "200":
-          description: WebSocket 인증 ticket
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SupportChatWebSocketTicketResponse"
-        "404":
-          description: 로그인 사용자 소유 상담방이 아님
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "503":
-          description: Redis ticket 저장소 장애
           content:
             application/json:
               schema:
@@ -4492,25 +4433,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SupportChatSessionList"
-  /api/admin/support/chat-sessions/ws-ticket:
-    post:
-      summary: 관리자 상담방 목록 WebSocket ticket 발급
-      description: /ws/admin/support-chat-queue 인증용 60초 TTL, 1회 사용 ticket을 발급한다.
-      security:
-        - bearerAuth: []
-      responses:
-        "200":
-          description: WebSocket 인증 ticket
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SupportChatWebSocketTicketResponse"
-        "503":
-          description: Redis ticket 저장소 장애
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
   /api/admin/support/chat-sessions/{id}:
     get:
       summary: 관리자 상담방 상세
@@ -4553,38 +4475,6 @@ paths:
                 $ref: "#/components/schemas/SupportChatSessionDto"
         "404":
           description: 상담방 없음
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-  /api/admin/support/chat-sessions/{id}/messages:
-    post:
-      summary: 관리자 상담 메시지 전송
-      security:
-        - bearerAuth: []
-      parameters:
-        - $ref: "#/components/parameters/PublicId"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/SupportChatMessageRequest"
-      responses:
-        "200":
-          description: 메시지 전송 후 갱신된 상담방 상세
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SupportChatSessionDto"
-        "400":
-          description: 메시지 내용 누락 또는 2000자 초과
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "409":
-          description: 종료된 AS 티켓 상담방
           content:
             application/json:
               schema:
@@ -4648,33 +4538,6 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "409":
           description: 종료된 AS 티켓 상담방
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-  /api/admin/support/chat-sessions/{id}/ws-ticket:
-    post:
-      summary: 관리자 상담방 WebSocket ticket 발급
-      description: WebSocket URL에 JWT를 싣지 않기 위해 60초 TTL, 1회 사용 ticket을 발급한다.
-      security:
-        - bearerAuth: []
-      parameters:
-        - $ref: "#/components/parameters/PublicId"
-      responses:
-        "200":
-          description: WebSocket 인증 ticket
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SupportChatWebSocketTicketResponse"
-        "404":
-          description: 상담방 없음
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "503":
-          description: Redis ticket 저장소 장애
           content:
             application/json:
               schema:
@@ -9639,14 +9502,6 @@ components:
           format: uuid
         symptom:
           type: string
-    SupportChatMessageRequest:
-      type: object
-      required: [content]
-      properties:
-        content:
-          type: string
-          minLength: 1
-          maxLength: 2000
     SupportChatVisitReservationRequest:
       type: object
       required: [scheduledAt]
@@ -9669,19 +9524,6 @@ components:
         technicianNote:
           type: string
           nullable: true
-    SupportChatWebSocketTicketResponse:
-      type: object
-      required: [ticket, expiresAt, expiresInSeconds]
-      properties:
-        ticket:
-          type: string
-          description: 60초 TTL, 1회 사용 WebSocket 인증 ticket
-        expiresAt:
-          type: string
-          format: date-time
-        expiresInSeconds:
-          type: integer
-          example: 60
     SupportChatSessionList:
       type: object
       required: [items, pollingIntervalMs]
@@ -9804,6 +9646,10 @@ components:
         id:
           type: string
           format: uuid
+        clientMessageId:
+          type: string
+          format: uuid
+          nullable: true
         role:
           type: string
           enum: [USER, ADMIN, SYSTEM]
