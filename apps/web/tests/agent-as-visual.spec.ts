@@ -1,4 +1,4 @@
-import { expect, test, type Request, type Route } from '@playwright/test';
+import { expect, test, type Page, type Request, type Route } from '@playwright/test';
 
 const screenshotDir = '../../artifacts/qa/agent-as';
 type MockTicket = Record<string, unknown> & { id: string };
