@@ -172,10 +172,6 @@ buildgraph:
     # (프리웜·티어스냅샷은 advisory lock이 없어 스케일 시 OpenAI N배 과금 → web-facing에서 반드시 off)
     enabled: ${BUILDGRAPH_SCHEDULING_ENABLED:true}
 
-support-chat:
-  ws-ticket:
-    ttl-seconds: ${SUPPORT_CHAT_WS_TICKET_TTL_SECONDS:60}
-
 agent:
   worker:
     enabled: ${AGENT_WORKER_ENABLED:true}

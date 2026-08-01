@@ -62,7 +62,10 @@ public class CurrentUserService {
     }
 
     public CurrentUser requireAdmin(String authorization) {
-        CurrentUser user = requireUser(authorization);
+        return requireAdminUser(requireUser(authorization));
+    }
+
+    public CurrentUser requireAdminUser(CurrentUser user) {
         String freshRole = findRoleByInternalId(user.internalId());
         if (!"ADMIN".equals(freshRole)) {
             evictCachedUser(user.id());

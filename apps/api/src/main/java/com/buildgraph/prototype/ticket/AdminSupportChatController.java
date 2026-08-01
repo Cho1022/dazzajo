@@ -5,7 +5,6 @@ import java.util.Map;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
@@ -17,24 +16,18 @@ import org.springframework.web.bind.annotation.RestController;
 public class AdminSupportChatController {
     private final SupportChatService supportChatService;
     private final CurrentUserService currentUserService;
-    private final SupportChatWebSocketHandler supportChatWebSocketHandler;
-    private final AdminSupportChatQueueWebSocketHandler adminSupportChatQueueWebSocketHandler;
-    private final SupportChatWebSocketTicketService supportChatWebSocketTicketService;
+    private final SupportChatEventPublisher supportChatEventPublisher;
     private final VisitSupportReservationService visitSupportReservationService;
 
     public AdminSupportChatController(
             SupportChatService supportChatService,
             CurrentUserService currentUserService,
-            SupportChatWebSocketHandler supportChatWebSocketHandler,
-            AdminSupportChatQueueWebSocketHandler adminSupportChatQueueWebSocketHandler,
-            SupportChatWebSocketTicketService supportChatWebSocketTicketService,
+            SupportChatEventPublisher supportChatEventPublisher,
             VisitSupportReservationService visitSupportReservationService
     ) {
         this.supportChatService = supportChatService;
         this.currentUserService = currentUserService;
-        this.supportChatWebSocketHandler = supportChatWebSocketHandler;
-        this.adminSupportChatQueueWebSocketHandler = adminSupportChatQueueWebSocketHandler;
-        this.supportChatWebSocketTicketService = supportChatWebSocketTicketService;
+        this.supportChatEventPublisher = supportChatEventPublisher;
         this.visitSupportReservationService = visitSupportReservationService;
     }
 
@@ -54,19 +47,6 @@ public class AdminSupportChatController {
         return supportChatService.adminDetail(id, admin, markRead);
     }
 
-    @PostMapping("/{id}/messages")
-    Map<String, Object> postMessage(
-            @PathVariable String id,
-            @RequestBody(required = false) Map<String, Object> request,
-            @RequestHeader(value = "Authorization", required = false) String authorization
-    ) {
-        CurrentUserService.CurrentUser admin = currentUserService.requireAdmin(authorization);
-        Map<String, Object> detail = supportChatService.postAdminMessage(id, request == null ? Map.of() : request, admin);
-        supportChatWebSocketHandler.broadcastRoomUpdate(id);
-        adminSupportChatQueueWebSocketHandler.broadcastQueuePatch(id);
-        return detail;
-    }
-
     @DeleteMapping("/{id}")
     Map<String, Object> deleteSession(
             @PathVariable String id,
@@ -74,8 +54,7 @@ public class AdminSupportChatController {
     ) {
         CurrentUserService.CurrentUser admin = currentUserService.requireAdmin(authorization);
         Map<String, Object> detail = supportChatService.deleteAdminSession(id, admin);
-        supportChatWebSocketHandler.broadcastRoomUpdate(id);
-        adminSupportChatQueueWebSocketHandler.broadcastQueuePatch(id);
+        supportChatEventPublisher.publishRoomChanged(id);
         return detail;
     }
 
@@ -87,8 +66,7 @@ public class AdminSupportChatController {
     ) {
         CurrentUserService.CurrentUser admin = currentUserService.requireAdmin(authorization);
         Map<String, Object> detail = visitSupportReservationService.scheduleAdminReservation(id, request == null ? Map.of() : request, admin);
-        supportChatWebSocketHandler.broadcastRoomUpdate(id);
-        adminSupportChatQueueWebSocketHandler.broadcastQueuePatch(id);
+        supportChatEventPublisher.publishRoomChanged(id);
         return detail;
     }
 
@@ -99,25 +77,7 @@ public class AdminSupportChatController {
     ) {
         CurrentUserService.CurrentUser admin = currentUserService.requireAdmin(authorization);
         Map<String, Object> detail = visitSupportReservationService.cancelAdminReservation(id, admin);
-        supportChatWebSocketHandler.broadcastRoomUpdate(id);
-        adminSupportChatQueueWebSocketHandler.broadcastQueuePatch(id);
+        supportChatEventPublisher.publishRoomChanged(id);
         return detail;
-    }
-
-    @PostMapping("/{id}/ws-ticket")
-    Map<String, Object> issueWebSocketTicket(
-            @PathVariable String id,
-            @RequestHeader(value = "Authorization", required = false) String authorization
-    ) {
-        CurrentUserService.CurrentUser admin = currentUserService.requireAdmin(authorization);
-        return supportChatWebSocketTicketService.issueAdminTicket(id, admin);
-    }
-
-    @PostMapping("/ws-ticket")
-    Map<String, Object> issueQueueWebSocketTicket(
-            @RequestHeader(value = "Authorization", required = false) String authorization
-    ) {
-        CurrentUserService.CurrentUser admin = currentUserService.requireAdmin(authorization);
-        return supportChatWebSocketTicketService.issueAdminQueueTicket(admin);
     }
 }
