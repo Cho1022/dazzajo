@@ -1,0 +1,33 @@
+plugins {
+    id 'java'
+    id 'io.gatling.gradle' version '3.15.1.2'
+}
+
+repositories {
+    mavenCentral()
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 21
+    options.encoding = 'UTF-8'
+}
+
+sourceSets {
+    gatling {
+        resources.srcDir 'runtime'
+    }
+}
+
+gatling {
+    systemProperties = ['file.encoding': 'UTF-8']
+}
+
+tasks.withType(io.gatling.gradle.GatlingRunTask).configureEach {
+    gatlingReportDir = file('../results')
+}
