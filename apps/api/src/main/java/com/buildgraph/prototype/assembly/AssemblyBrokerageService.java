@@ -241,14 +241,23 @@ public class AssemblyBrokerageService {
         if (!USER_CANCEL_STATUSES.contains(status)) {
             throw conflict("조립이 시작된 요청은 사용자가 취소할 수 없습니다.");
         }
-        // 서버 허용 범위를 UI의 canCancel 산식과 일치시킨다 — 결제(PAID) 이후에는 사용자
-        // 자기취소를 막는다(취소 버튼이 없는데 API 직접 호출로 전액 포인트 환불이 되던 구멍).
-        Map<String, Object> payment = paymentRow(requestId);
+        Map<String, Object> payment = paymentRowForUpdate(requestId);
+        List<Map<String, Object>> attempts = activePaymentAttemptsForUpdate(payment);
         if (payment != null && "PAID".equals(DbValueMapper.string(payment, "status"))) {
             throw conflict("결제가 완료된 요청은 직접 취소할 수 없습니다. 고객센터(관리자)를 통해 취소해 주세요.");
         }
+        if (payment != null && !"PENDING".equals(DbValueMapper.string(payment, "status"))) {
+            throw conflict("결제 상태가 이미 변경되어 요청을 취소할 수 없습니다.");
+        }
+        boolean verificationStarted = attempts.stream().anyMatch(attempt -> {
+            String attemptStatus = DbValueMapper.string(attempt, "status");
+            return "VERIFYING".equals(attemptStatus) || "SUCCEEDED".equals(attemptStatus);
+        });
+        if (verificationStarted) {
+            throw conflict("결제 검증이 시작되었거나 완료되어 요청을 취소할 수 없습니다.");
+        }
         String reason = requiredLimitedText(body.get("reason"), 1000, "취소 사유가 필요합니다.");
-        cancelRequest(requestId, user.internalId(), status, reason);
+        cancelUserRequest(requestId, user.internalId(), status, reason, payment, attempts);
         return detailByInternalId(requestId);
     }
 
@@ -863,6 +872,30 @@ public class AssemblyBrokerageService {
                 """, requestId).stream().findFirst().orElse(null);
     }
 
+    private Map<String, Object> paymentRowForUpdate(Long requestId) {
+        return jdbcTemplate.queryForList("""
+                SELECT id AS internal_id, public_id::text AS id, amount, paid_amount, currency,
+                       provider, method, status, paid_at, verified_at, refunded_at, updated_at
+                FROM assembly_payments
+                WHERE assembly_request_id = ?
+                FOR UPDATE
+                """, requestId).stream().findFirst().orElse(null);
+    }
+
+    private List<Map<String, Object>> activePaymentAttemptsForUpdate(Map<String, Object> payment) {
+        if (payment == null) {
+            return List.of();
+        }
+        return jdbcTemplate.queryForList("""
+                SELECT id, status
+                FROM assembly_payment_attempts
+                WHERE assembly_payment_id = ?
+                  AND status IN ('READY', 'PROCESSING', 'VERIFYING', 'SUCCEEDED')
+                ORDER BY id
+                FOR UPDATE
+                """, longValue(payment, "internal_id"));
+    }
+
     private Map<String, Object> offerRow(Long requestId, String offerPublicId) {
         return jdbcTemplate.queryForList("SELECT *, id AS internal_id FROM assembly_offers WHERE assembly_request_id = ? AND public_id = ?::uuid", requestId, offerPublicId)
                 .stream().findFirst().orElseThrow(this::notFound);
@@ -937,6 +970,56 @@ public class AssemblyBrokerageService {
                 WHERE assembly_request_id = ? AND status = 'PENDING'
                 """, requestId);
         addHistory(requestId, actorId, currentStatus, "CANCELLED", reason);
+    }
+
+    private void cancelUserRequest(
+            Long requestId,
+            Long actorId,
+            String currentStatus,
+            String reason,
+            Map<String, Object> payment,
+            List<Map<String, Object>> attempts
+    ) {
+        requireOneRow(jdbcTemplate.update("""
+                UPDATE assembly_requests
+                SET status = 'CANCELLED', cancellation_reason = ?, cancelled_at = now(), updated_at = now()
+                WHERE id = ? AND status = ?
+                """, reason, requestId, currentStatus), "조립 요청 상태가 이미 변경되었습니다.");
+        jdbcTemplate.update("""
+                UPDATE assembly_offers
+                SET status = 'EXPIRED', updated_at = now()
+                WHERE assembly_request_id = ? AND status = 'AVAILABLE'
+                """, requestId);
+
+        long cancellableAttempts = attempts.stream()
+                .map(attempt -> DbValueMapper.string(attempt, "status"))
+                .filter(attemptStatus -> "READY".equals(attemptStatus) || "PROCESSING".equals(attemptStatus))
+                .count();
+        if (cancellableAttempts > 0) {
+            int updatedAttempts = jdbcTemplate.update("""
+                    UPDATE assembly_payment_attempts
+                    SET status = 'CANCELLED', failure_code = 'ORDER_CANCELLED',
+                        failure_message = '조립 요청이 취소되었습니다.', completed_at = now(), updated_at = now()
+                    WHERE assembly_payment_id = ? AND status IN ('READY', 'PROCESSING')
+                    """, longValue(payment, "internal_id"));
+            if (updatedAttempts != cancellableAttempts) {
+                throw conflict("결제 시도 상태가 이미 변경되었습니다.");
+            }
+        }
+        if (payment != null) {
+            requireOneRow(jdbcTemplate.update("""
+                    UPDATE assembly_payments
+                    SET status = 'CANCELLED', cancelled_at = now(), updated_at = now()
+                    WHERE id = ? AND status = 'PENDING'
+                    """, longValue(payment, "internal_id")), "결제 상태가 이미 변경되었습니다.");
+        }
+        addHistory(requestId, actorId, currentStatus, "CANCELLED", reason);
+    }
+
+    private static void requireOneRow(int updatedRows, String message) {
+        if (updatedRows != 1) {
+            throw conflict(message);
+        }
     }
 
     private void addHistory(Long requestId, Long actorId, String from, String to, String note) {

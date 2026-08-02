@@ -170,14 +170,26 @@ public class AssemblyPaymentService {
             String idempotencyKey,
             PaymentMethod method
     ) {
-        Map<String, Object> payment = jdbcTemplate.queryForList("""
-                SELECT ar.id AS request_id, ar.request_no, ar.status AS request_status,
-                       ap.id AS payment_id, ap.status AS payment_status, ap.amount, ap.currency
+        Map<String, Object> ids = jdbcTemplate.queryForList("""
+                SELECT ar.id AS request_id, ap.id AS payment_id
                 FROM assembly_requests ar
                 JOIN assembly_payments ap ON ap.assembly_request_id = ar.id
                 WHERE ar.public_id = ?::uuid AND ar.user_id = ?
-                FOR UPDATE OF ar, ap
                 """, requestPublicId, userId).stream().findFirst().orElseThrow(this::notFound);
+        Map<String, Object> request = jdbcTemplate.queryForList("""
+                SELECT id AS request_id, request_no, status AS request_status
+                FROM assembly_requests
+                WHERE id = ? AND user_id = ?
+                FOR UPDATE
+                """, longValue(ids, "request_id"), userId).stream().findFirst().orElseThrow(this::notFound);
+        Map<String, Object> payment = jdbcTemplate.queryForList("""
+                SELECT id AS payment_id, status AS payment_status, amount, currency
+                FROM assembly_payments
+                WHERE id = ? AND assembly_request_id = ?
+                FOR UPDATE
+                """, longValue(ids, "payment_id"), longValue(ids, "request_id"))
+                .stream().findFirst().orElseThrow(this::notFound);
+        payment.putAll(request);
         if (!"MATCHED".equals(text(payment, "request_status"))) {
             throw conflict("기사 매칭 후에만 결제를 시작할 수 있습니다.");
         }
@@ -198,12 +210,14 @@ public class AssemblyPaymentService {
         Map<String, Object> existing = jdbcTemplate.queryForList("""
                 SELECT * FROM assembly_payment_attempts
                 WHERE assembly_payment_id = ? AND idempotency_key = ?
+                FOR UPDATE
                 """, paymentId, idempotencyKey).stream().findFirst().orElse(null);
         if (existing == null) {
             existing = jdbcTemplate.queryForList("""
                     SELECT * FROM assembly_payment_attempts
                     WHERE assembly_payment_id = ? AND status IN ('READY', 'PROCESSING', 'VERIFYING')
                     ORDER BY created_at DESC, id DESC LIMIT 1
+                    FOR UPDATE
                     """, paymentId).stream().findFirst().orElse(null);
         }
         if (existing != null) {
@@ -223,85 +237,173 @@ public class AssemblyPaymentService {
     }
 
     private Map<String, Object> verifyAndFinalize(String merchantPaymentId, Long userId) {
-        if (userId == null) {
-            jdbcTemplate.update("""
-                    UPDATE assembly_payment_attempts
-                    SET status = 'VERIFYING', updated_at = now()
-                    WHERE merchant_payment_id = ? AND status IN ('READY', 'PROCESSING', 'VERIFYING')
-                    """, merchantPaymentId);
-        } else {
-            jdbcTemplate.update("""
-                    UPDATE assembly_payment_attempts apa
-                    SET status = 'VERIFYING', updated_at = now()
-                    FROM assembly_payments ap, assembly_requests ar
-                    WHERE apa.assembly_payment_id = ap.id AND ap.assembly_request_id = ar.id
-                      AND apa.merchant_payment_id = ? AND ar.user_id = ?
-                      AND apa.status IN ('READY', 'PROCESSING', 'VERIFYING')
-                    """, merchantPaymentId, userId);
+        VerificationStart start = transactionTemplate.execute(
+                status -> beginVerification(merchantPaymentId, userId)
+        );
+        if (start == null) {
+            throw new IllegalStateException("결제 검증 시작 결과가 없습니다.");
         }
-        PaymentGateway.VerificationResult verification = paymentGateway.verify(merchantPaymentId);
-        Map<String, Object> result = transactionTemplate.execute(status -> {
-            String ownerClause = userId == null ? "" : " AND ar.user_id = ?";
-            Object[] params = userId == null ? new Object[]{merchantPaymentId} : new Object[]{merchantPaymentId, userId};
-            Map<String, Object> attempt = jdbcTemplate.queryForList("""
-                    SELECT apa.*, ap.id AS payment_id, ap.amount AS payment_amount, ap.status AS payment_status,
-                           ap.currency AS payment_currency
-                    FROM assembly_payment_attempts apa
-                    JOIN assembly_payments ap ON ap.id = apa.assembly_payment_id
-                    JOIN assembly_requests ar ON ar.id = ap.assembly_request_id
-                    WHERE apa.merchant_payment_id = ?
-                    """ + ownerClause + " FOR UPDATE OF apa, ap", params).stream().findFirst().orElseThrow(this::notFound);
-            String currentStatus = text(attempt, "status");
-            if (isTerminal(currentStatus)) {
-                return attemptMap(attempt);
-            }
-            if (OffsetDateTime.now().isAfter(offsetDateTime(attempt.get("expires_at")))) {
-                jdbcTemplate.update("""
-                        UPDATE assembly_payment_attempts
-                        SET status = 'EXPIRED', failure_code = 'ATTEMPT_EXPIRED', failure_message = '결제 유효 시간이 만료되었습니다.',
-                            completed_at = now(), updated_at = now()
-                        WHERE id = ?
-                        """, longValue(attempt, "id"));
-                return attemptMap(reloadAttempt(longValue(attempt, "id")));
-            }
-            if (verification.status() == PaymentGateway.VerificationStatus.PENDING) {
-                jdbcTemplate.update("UPDATE assembly_payment_attempts SET status = 'PROCESSING', updated_at = now() WHERE id = ?", longValue(attempt, "id"));
-                return attemptMap(reloadAttempt(longValue(attempt, "id")));
-            }
-            if (verification.status() == PaymentGateway.VerificationStatus.PAID && verificationMatches(attempt, verification)) {
-                jdbcTemplate.update("""
-                        UPDATE assembly_payment_attempts
-                        SET status = 'SUCCEEDED', provider_transaction_id = ?, pg_transaction_id = ?, approved_amount = ?,
-                            verified_at = now(), completed_at = now(), updated_at = now(), failure_code = NULL, failure_message = NULL
-                        WHERE id = ?
-                        """, verification.providerTransactionId(), verification.pgTransactionId(), verification.amount(), longValue(attempt, "id"));
-                jdbcTemplate.update("""
-                        UPDATE assembly_payments
-                        SET provider = 'MOCK', method = ?, currency = ?, paid_amount = ?, status = 'PAID',
-                            paid_at = COALESCE(paid_at, now()), verified_at = now(), updated_at = now()
-                        WHERE id = ? AND status = 'PENDING'
-                        """, text(attempt, "pay_method"), verification.currency(), verification.amount(), longValue(attempt, "payment_id"));
-                return attemptMap(reloadAttempt(longValue(attempt, "id")));
-            }
+        if (start.completedAttempt() != null) {
+            return start.completedAttempt();
+        }
 
-            String finalStatus = verification.status() == PaymentGateway.VerificationStatus.CANCELLED ? "CANCELLED" : "FAILED";
-            String failureCode = verification.status() == PaymentGateway.VerificationStatus.PAID
-                    ? "PAYMENT_VERIFICATION_MISMATCH" : verification.failureCode();
-            String failureMessage = verification.status() == PaymentGateway.VerificationStatus.PAID
-                    ? "PG 조회 결과와 서버 주문 정보가 일치하지 않습니다." : verification.failureMessage();
-            jdbcTemplate.update("""
-                    UPDATE assembly_payment_attempts
-                    SET status = ?, provider_transaction_id = COALESCE(?, provider_transaction_id), approved_amount = ?,
-                        failure_code = ?, failure_message = ?, verified_at = now(), completed_at = now(), updated_at = now()
-                    WHERE id = ?
-                    """, finalStatus, verification.providerTransactionId(), verification.amount(), failureCode,
-                    limitedMessage(failureMessage), longValue(attempt, "id"));
-            return attemptMap(reloadAttempt(longValue(attempt, "id")));
-        });
+        // 외부 PG 네트워크 호출은 DB row lock과 transaction을 점유하지 않는다.
+        PaymentGateway.VerificationResult verification = paymentGateway.verify(merchantPaymentId);
+        Map<String, Object> result = transactionTemplate.execute(
+                status -> finalizeVerification(merchantPaymentId, userId, verification)
+        );
         if (result == null) {
             throw new IllegalStateException("결제 검증 결과가 없습니다.");
         }
         return result;
+    }
+
+    private VerificationStart beginVerification(String merchantPaymentId, Long userId) {
+        Map<String, Object> attempt = lockPaymentContext(merchantPaymentId, userId);
+        requireRequestCanCompletePayment(attempt);
+
+        String attemptStatus = text(attempt, "status");
+        if (isTerminal(attemptStatus)) {
+            return new VerificationStart(attemptMap(attempt));
+        }
+        requirePendingPayment(attempt);
+        if (OffsetDateTime.now().isAfter(offsetDateTime(attempt.get("expires_at")))) {
+            requireOneRow(jdbcTemplate.update("""
+                    UPDATE assembly_payment_attempts
+                    SET status = 'EXPIRED', failure_code = 'ATTEMPT_EXPIRED', failure_message = '결제 유효 시간이 만료되었습니다.',
+                        completed_at = now(), updated_at = now()
+                    WHERE id = ? AND status IN ('READY', 'PROCESSING')
+                    """, longValue(attempt, "id")), "결제 시도 만료 상태가 이미 변경되었습니다.");
+            return new VerificationStart(attemptMap(reloadAttempt(longValue(attempt, "id"))));
+        }
+        if (!"READY".equals(attemptStatus) && !"PROCESSING".equals(attemptStatus)) {
+            throw conflict("이미 결제 검증이 진행 중입니다.");
+        }
+        requireOneRow(jdbcTemplate.update("""
+                UPDATE assembly_payment_attempts
+                SET status = 'VERIFYING', updated_at = now()
+                WHERE id = ? AND status IN ('READY', 'PROCESSING')
+                """, longValue(attempt, "id")), "결제 검증 시작 상태가 이미 변경되었습니다.");
+        return new VerificationStart(null);
+    }
+
+    private Map<String, Object> finalizeVerification(
+            String merchantPaymentId,
+            Long userId,
+            PaymentGateway.VerificationResult verification
+    ) {
+        Map<String, Object> attempt = lockPaymentContext(merchantPaymentId, userId);
+        requireRequestCanCompletePayment(attempt);
+        requirePendingPayment(attempt);
+        if (!"VERIFYING".equals(text(attempt, "status"))) {
+            throw conflict("결제 검증 상태가 이미 변경되었습니다.");
+        }
+        if (OffsetDateTime.now().isAfter(offsetDateTime(attempt.get("expires_at")))) {
+            requireOneRow(jdbcTemplate.update("""
+                    UPDATE assembly_payment_attempts
+                    SET status = 'EXPIRED', failure_code = 'ATTEMPT_EXPIRED', failure_message = '결제 유효 시간이 만료되었습니다.',
+                        completed_at = now(), updated_at = now()
+                    WHERE id = ? AND status = 'VERIFYING'
+                    """, longValue(attempt, "id")), "결제 시도 만료 상태가 이미 변경되었습니다.");
+            return attemptMap(reloadAttempt(longValue(attempt, "id")));
+        }
+        if (verification.status() == PaymentGateway.VerificationStatus.PENDING) {
+            requireOneRow(jdbcTemplate.update("""
+                    UPDATE assembly_payment_attempts
+                    SET status = 'PROCESSING', updated_at = now()
+                    WHERE id = ? AND status = 'VERIFYING'
+                    """, longValue(attempt, "id")), "결제 대기 상태가 이미 변경되었습니다.");
+            return attemptMap(reloadAttempt(longValue(attempt, "id")));
+        }
+        if (verification.status() == PaymentGateway.VerificationStatus.PAID
+                && verificationMatches(attempt, verification)) {
+            requireOneRow(jdbcTemplate.update("""
+                    UPDATE assembly_payments
+                    SET provider = 'MOCK', method = ?, currency = ?, paid_amount = ?, status = 'PAID',
+                        paid_at = COALESCE(paid_at, now()), verified_at = now(), updated_at = now()
+                    WHERE id = ? AND status = 'PENDING'
+                    """, text(attempt, "pay_method"), verification.currency(), verification.amount(),
+                    longValue(attempt, "payment_id")), "결제 상태가 이미 변경되었습니다.");
+            requireOneRow(jdbcTemplate.update("""
+                    UPDATE assembly_payment_attempts
+                    SET status = 'SUCCEEDED', provider_transaction_id = ?, pg_transaction_id = ?, approved_amount = ?,
+                        verified_at = now(), completed_at = now(), updated_at = now(), failure_code = NULL, failure_message = NULL
+                    WHERE id = ? AND status = 'VERIFYING'
+                    """, verification.providerTransactionId(), verification.pgTransactionId(), verification.amount(),
+                    longValue(attempt, "id")), "결제 시도 상태가 이미 변경되었습니다.");
+            return attemptMap(reloadAttempt(longValue(attempt, "id")));
+        }
+
+        String finalStatus = verification.status() == PaymentGateway.VerificationStatus.CANCELLED ? "CANCELLED" : "FAILED";
+        String failureCode = verification.status() == PaymentGateway.VerificationStatus.PAID
+                ? "PAYMENT_VERIFICATION_MISMATCH" : verification.failureCode();
+        String failureMessage = verification.status() == PaymentGateway.VerificationStatus.PAID
+                ? "PG 조회 결과와 서버 주문 정보가 일치하지 않습니다." : verification.failureMessage();
+        requireOneRow(jdbcTemplate.update("""
+                UPDATE assembly_payment_attempts
+                SET status = ?, provider_transaction_id = COALESCE(?, provider_transaction_id), approved_amount = ?,
+                    failure_code = ?, failure_message = ?, verified_at = now(), completed_at = now(), updated_at = now()
+                WHERE id = ? AND status = 'VERIFYING'
+                """, finalStatus, verification.providerTransactionId(), verification.amount(), failureCode,
+                limitedMessage(failureMessage), longValue(attempt, "id")), "결제 시도 상태가 이미 변경되었습니다.");
+        return attemptMap(reloadAttempt(longValue(attempt, "id")));
+    }
+
+    private Map<String, Object> lockPaymentContext(String merchantPaymentId, Long userId) {
+        String ownerClause = userId == null ? "" : " AND ar.user_id = ?";
+        Object[] params = userId == null
+                ? new Object[]{merchantPaymentId}
+                : new Object[]{merchantPaymentId, userId};
+        Map<String, Object> ids = jdbcTemplate.queryForList("""
+                SELECT ar.id AS request_id, ap.id AS payment_id, apa.id AS attempt_id
+                FROM assembly_requests ar
+                JOIN assembly_payments ap ON ap.assembly_request_id = ar.id
+                JOIN assembly_payment_attempts apa ON apa.assembly_payment_id = ap.id
+                WHERE apa.merchant_payment_id = ?
+                """ + ownerClause, params).stream().findFirst().orElseThrow(this::notFound);
+
+        Map<String, Object> request = jdbcTemplate.queryForList("""
+                SELECT id AS request_id, status AS request_status
+                FROM assembly_requests
+                WHERE id = ?
+                FOR UPDATE
+                """, longValue(ids, "request_id")).stream().findFirst().orElseThrow(this::notFound);
+        Map<String, Object> payment = jdbcTemplate.queryForList("""
+                SELECT id AS payment_id, status AS payment_status, amount AS payment_amount,
+                       currency AS payment_currency
+                FROM assembly_payments
+                WHERE id = ? AND assembly_request_id = ?
+                FOR UPDATE
+                """, longValue(ids, "payment_id"), longValue(ids, "request_id"))
+                .stream().findFirst().orElseThrow(this::notFound);
+        Map<String, Object> attempt = jdbcTemplate.queryForList("""
+                SELECT *
+                FROM assembly_payment_attempts
+                WHERE id = ? AND assembly_payment_id = ? AND merchant_payment_id = ?
+                FOR UPDATE
+                """, longValue(ids, "attempt_id"), longValue(ids, "payment_id"), merchantPaymentId)
+                .stream().findFirst().orElseThrow(this::notFound);
+        attempt.putAll(request);
+        attempt.putAll(payment);
+        return attempt;
+    }
+
+    private static void requireRequestCanCompletePayment(Map<String, Object> attempt) {
+        if (!"MATCHED".equals(text(attempt, "request_status"))) {
+            throw conflict("취소되었거나 결제를 완료할 수 없는 조립 요청 상태입니다.");
+        }
+    }
+
+    private static void requirePendingPayment(Map<String, Object> attempt) {
+        if (!"PENDING".equals(text(attempt, "payment_status"))) {
+            throw conflict("결제 상태가 이미 변경되었습니다.");
+        }
+    }
+
+    private static void requireOneRow(int updatedRows, String message) {
+        if (updatedRows != 1) {
+            throw conflict(message);
+        }
     }
 
     private boolean verificationMatches(Map<String, Object> attempt, PaymentGateway.VerificationResult result) {
@@ -510,5 +612,8 @@ public class AssemblyPaymentService {
             String easyPayProvider,
             OffsetDateTime expiresAt
     ) {
+    }
+
+    private record VerificationStart(Map<String, Object> completedAttempt) {
     }
 }
