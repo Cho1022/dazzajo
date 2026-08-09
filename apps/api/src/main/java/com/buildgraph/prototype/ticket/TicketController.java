@@ -19,18 +19,18 @@ public class TicketController {
     private final TicketQueryService ticketQueryService;
     private final AsTicketDraftService asTicketDraftService;
     private final CurrentUserService currentUserService;
-    private final AdminSupportChatQueueWebSocketHandler adminSupportChatQueueWebSocketHandler;
+    private final SupportChatEventPublisher supportChatEventPublisher;
 
     public TicketController(
             TicketQueryService ticketQueryService,
             AsTicketDraftService asTicketDraftService,
             CurrentUserService currentUserService,
-            AdminSupportChatQueueWebSocketHandler adminSupportChatQueueWebSocketHandler
+            SupportChatEventPublisher supportChatEventPublisher
     ) {
         this.ticketQueryService = ticketQueryService;
         this.asTicketDraftService = asTicketDraftService;
         this.currentUserService = currentUserService;
-        this.adminSupportChatQueueWebSocketHandler = adminSupportChatQueueWebSocketHandler;
+        this.supportChatEventPublisher = supportChatEventPublisher;
     }
 
     @PostMapping("/as-tickets")
@@ -43,7 +43,7 @@ public class TicketController {
         Map<String, Object> ticket = ticketQueryService.create(request, user);
         String supportChatRoomId = stringOrNull(ticket.get("supportChatRoomId"));
         if (supportChatRoomId != null) {
-            adminSupportChatQueueWebSocketHandler.broadcastQueuePatch(supportChatRoomId);
+            supportChatEventPublisher.publishRoomChanged(supportChatRoomId);
         }
         return ticket;
     }

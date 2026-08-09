@@ -4,7 +4,6 @@ import com.buildgraph.prototype.user.CurrentUserService;
 import java.util.Map;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
@@ -17,24 +16,18 @@ import org.springframework.web.bind.annotation.RestController;
 public class SupportChatController {
     private final SupportChatService supportChatService;
     private final CurrentUserService currentUserService;
-    private final SupportChatWebSocketHandler supportChatWebSocketHandler;
-    private final AdminSupportChatQueueWebSocketHandler adminSupportChatQueueWebSocketHandler;
-    private final SupportChatWebSocketTicketService supportChatWebSocketTicketService;
+    private final SupportChatEventPublisher supportChatEventPublisher;
     private final VisitSupportReservationService visitSupportReservationService;
 
     public SupportChatController(
             SupportChatService supportChatService,
             CurrentUserService currentUserService,
-            SupportChatWebSocketHandler supportChatWebSocketHandler,
-            AdminSupportChatQueueWebSocketHandler adminSupportChatQueueWebSocketHandler,
-            SupportChatWebSocketTicketService supportChatWebSocketTicketService,
+            SupportChatEventPublisher supportChatEventPublisher,
             VisitSupportReservationService visitSupportReservationService
     ) {
         this.supportChatService = supportChatService;
         this.currentUserService = currentUserService;
-        this.supportChatWebSocketHandler = supportChatWebSocketHandler;
-        this.adminSupportChatQueueWebSocketHandler = adminSupportChatQueueWebSocketHandler;
-        this.supportChatWebSocketTicketService = supportChatWebSocketTicketService;
+        this.supportChatEventPublisher = supportChatEventPublisher;
         this.visitSupportReservationService = visitSupportReservationService;
     }
 
@@ -60,19 +53,6 @@ public class SupportChatController {
         return supportChatService.detail(id, user);
     }
 
-    @PostMapping("/{id}/messages")
-    Map<String, Object> postMessage(
-            @PathVariable String id,
-            @RequestBody(required = false) Map<String, Object> request,
-            @RequestHeader(value = "Authorization", required = false) String authorization
-    ) {
-        CurrentUserService.CurrentUser user = currentUserService.requireUser(authorization);
-        Map<String, Object> detail = supportChatService.postUserMessage(id, request == null ? Map.of() : request, user);
-        supportChatWebSocketHandler.broadcastRoomUpdate(id);
-        adminSupportChatQueueWebSocketHandler.broadcastQueuePatch(id);
-        return detail;
-    }
-
     @PutMapping("/{id}/visit-reservation")
     Map<String, Object> putVisitReservation(
             @PathVariable String id,
@@ -81,17 +61,7 @@ public class SupportChatController {
     ) {
         CurrentUserService.CurrentUser user = currentUserService.requireUser(authorization);
         Map<String, Object> detail = visitSupportReservationService.requestUserReservation(id, request == null ? Map.of() : request, user);
-        supportChatWebSocketHandler.broadcastRoomUpdate(id);
-        adminSupportChatQueueWebSocketHandler.broadcastQueuePatch(id);
+        supportChatEventPublisher.publishRoomChanged(id);
         return detail;
-    }
-
-    @PostMapping("/{id}/ws-ticket")
-    Map<String, Object> issueWebSocketTicket(
-            @PathVariable String id,
-            @RequestHeader(value = "Authorization", required = false) String authorization
-    ) {
-        CurrentUserService.CurrentUser user = currentUserService.requireUser(authorization);
-        return supportChatWebSocketTicketService.issueUserTicket(id, user);
     }
 }
