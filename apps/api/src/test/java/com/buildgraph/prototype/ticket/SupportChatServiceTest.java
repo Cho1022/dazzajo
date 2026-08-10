@@ -11,7 +11,10 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.buildgraph.prototype.ticket.SupportChatMessagingContract.MessageRequest;
+import com.buildgraph.prototype.ticket.SupportChatMessagingContract.SavedMessage;
 import com.buildgraph.prototype.user.CurrentUserService;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -22,6 +25,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 class SupportChatServiceTest {
     private static final String ROOM_ID = "00000000-0000-4000-8000-000000009001";
+    private static final String CLIENT_MESSAGE_ID = "00000000-0000-4000-8000-000000009101";
     private static final CurrentUserService.CurrentUser USER = new CurrentUserService.CurrentUser(
             1004L,
             "00000000-0000-4000-8000-000000001004",
@@ -43,43 +47,91 @@ class SupportChatServiceTest {
     private final SupportChatService service = new SupportChatService(jdbcTemplate);
 
     @Test
-    void postUserMessageRejectsNonStringContent() {
-        assertThatThrownBy(() -> service.postUserMessage(ROOM_ID, Map.of("content", 123), USER))
+    void saveMessageRejectsMissingRequest() {
+        assertThatThrownBy(() -> service.saveMessage(null, USER))
                 .isInstanceOf(ResponseStatusException.class)
                 .satisfies(error -> assertThat(((ResponseStatusException) error).getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));
 
-        verify(jdbcTemplate, never()).update(contains("INSERT INTO support_chat_messages"), any(), any(), any(), any());
+        verify(jdbcTemplate, never()).queryForList(contains("INSERT INTO support_chat_messages"), any(), any(), any(), any(), any());
     }
 
     @Test
-    void postUserMessageRejectsBlankNullLiteralAndTooLongContent() {
-        assertBadRequest(Map.of("content", "   "));
-        assertBadRequest(Map.of("content", "null"));
-        assertBadRequest(Map.of("content", "x".repeat(2001)));
+    void saveMessageRejectsBlankNullLiteralTooLongContentAndInvalidClientId() {
+        assertBadRequest(new MessageRequest(ROOM_ID, CLIENT_MESSAGE_ID, "   "));
+        assertBadRequest(new MessageRequest(ROOM_ID, CLIENT_MESSAGE_ID, "null"));
+        assertBadRequest(new MessageRequest(ROOM_ID, CLIENT_MESSAGE_ID, "x".repeat(2001)));
+        assertBadRequest(new MessageRequest(ROOM_ID, "not-a-uuid", "hello"));
 
-        verify(jdbcTemplate, never()).update(contains("INSERT INTO support_chat_messages"), any(), any(), any(), any());
+        verify(jdbcTemplate, never()).queryForList(contains("INSERT INTO support_chat_messages"), any(), any(), any(), any(), any());
     }
 
     @Test
-    void postUserMessageRejectsTerminalTicketWithoutInsertingMessage() {
+    void saveMessageRejectsTerminalTicketWithoutInsertingMessage() {
         mockRoom("ACTIVE", "CLOSED");
 
-        assertThatThrownBy(() -> service.postUserMessage(ROOM_ID, Map.of("content", "아직 확인할 내용이 있습니다."), USER))
+        assertThatThrownBy(() -> service.saveMessage(messageRequest("아직 확인할 내용이 있습니다."), USER))
                 .isInstanceOf(ResponseStatusException.class)
                 .satisfies(error -> assertThat(((ResponseStatusException) error).getStatusCode()).isEqualTo(HttpStatus.CONFLICT));
 
-        verify(jdbcTemplate, never()).update(contains("INSERT INTO support_chat_messages"), any(), any(), any(), any());
+        verify(jdbcTemplate, never()).queryForList(contains("INSERT INTO support_chat_messages"), any(), any(), any(), any(), any());
     }
 
     @Test
-    void postUserMessageRejectsInactiveRoomWithoutInsertingMessage() {
+    void saveMessageRejectsInactiveRoomWithoutInsertingMessage() {
         mockRoom("ARCHIVED", "OPEN");
 
-        assertThatThrownBy(() -> service.postUserMessage(ROOM_ID, Map.of("content", "아직 확인할 내용이 있습니다."), USER))
+        assertThatThrownBy(() -> service.saveMessage(messageRequest("아직 확인할 내용이 있습니다."), USER))
                 .isInstanceOf(ResponseStatusException.class)
                 .satisfies(error -> assertThat(((ResponseStatusException) error).getStatusCode()).isEqualTo(HttpStatus.CONFLICT));
 
-        verify(jdbcTemplate, never()).update(contains("INSERT INTO support_chat_messages"), any(), any(), any(), any());
+        verify(jdbcTemplate, never()).queryForList(contains("INSERT INTO support_chat_messages"), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void saveMessageReturnsCanonicalEventAndUpdatesUnreadCountsOnce() {
+        mockRoom("ACTIVE", "OPEN");
+        when(jdbcTemplate.queryForList(
+                contains("INSERT INTO support_chat_messages"),
+                eq(7001L), eq("USER"), eq("상담 가능할까요?"), eq(USER.internalId()), eq(CLIENT_MESSAGE_ID)
+        )).thenReturn(List.of(messageRow()));
+
+        SavedMessage saved = service.saveMessage(messageRequest("상담 가능할까요?"), USER);
+
+        assertThat(saved.inserted()).isTrue();
+        assertThat(saved.event().roomId()).isEqualTo(ROOM_ID);
+        assertThat(saved.event().clientMessageId()).isEqualTo(CLIENT_MESSAGE_ID);
+        assertThat(saved.event().senderRole()).isEqualTo("USER");
+        verify(jdbcTemplate).update(
+                contains("UPDATE support_chat_rooms"),
+                eq("상담 가능할까요?"), eq(0), eq(1), eq(7001L)
+        );
+    }
+
+    @Test
+    void duplicateClientMessageIdReturnsExistingMessageWithoutUpdatingRoomAgain() {
+        mockRoom("ACTIVE", "OPEN");
+        when(jdbcTemplate.queryForList(
+                contains("INSERT INTO support_chat_messages"),
+                eq(7001L), eq("USER"), eq("상담 가능할까요?"), eq(USER.internalId()), eq(CLIENT_MESSAGE_ID)
+        )).thenReturn(List.of());
+        when(jdbcTemplate.queryForList(
+                contains("WHERE m.sender_user_id = ?"),
+                eq(USER.internalId()), eq(CLIENT_MESSAGE_ID)
+        )).thenReturn(List.of(Map.ofEntries(
+                Map.entry("message_id", "00000000-0000-4000-8000-000000009201"),
+                Map.entry("client_message_id", CLIENT_MESSAGE_ID),
+                Map.entry("room_id", ROOM_ID),
+                Map.entry("content", "상담 가능할까요?"),
+                Map.entry("created_at", OffsetDateTime.parse("2026-08-02T10:00:00+09:00"))
+        )));
+
+        SavedMessage saved = service.saveMessage(messageRequest("상담 가능할까요?"), USER);
+
+        assertThat(saved.inserted()).isFalse();
+        assertThat(saved.event().messageId()).isEqualTo("00000000-0000-4000-8000-000000009201");
+        verify(jdbcTemplate, never()).update(
+                contains("UPDATE support_chat_rooms"), any(), any(), any(), any()
+        );
     }
 
     @Test
@@ -319,10 +371,23 @@ class SupportChatServiceTest {
         verify(jdbcTemplate, never()).update(contains("UPDATE as_tickets"), any(), any());
     }
 
-    private void assertBadRequest(Map<String, Object> request) {
-        assertThatThrownBy(() -> service.postUserMessage(ROOM_ID, request, USER))
+    private void assertBadRequest(MessageRequest request) {
+        assertThatThrownBy(() -> service.saveMessage(request, USER))
                 .isInstanceOf(ResponseStatusException.class)
                 .satisfies(error -> assertThat(((ResponseStatusException) error).getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST));
+    }
+
+    private static MessageRequest messageRequest(String content) {
+        return new MessageRequest(ROOM_ID, CLIENT_MESSAGE_ID, content);
+    }
+
+    private static Map<String, Object> messageRow() {
+        return Map.ofEntries(
+                Map.entry("message_id", "00000000-0000-4000-8000-000000009201"),
+                Map.entry("client_message_id", CLIENT_MESSAGE_ID),
+                Map.entry("content", "상담 가능할까요?"),
+                Map.entry("created_at", OffsetDateTime.parse("2026-08-02T10:00:00+09:00"))
+        );
     }
 
     private void mockRoom(String roomStatus, String ticketStatus) {
