@@ -292,13 +292,14 @@ async function mockAdmin(page: Page) {
 
 async function mockUserChat(page: Page, onDetailRead?: () => void) {
   const detail = chatDetail();
+  const summary = { ...detail, messages: null, summary: true };
   await page.route(`**/api/as-tickets/${TICKET_ID}`, (route) => route.fulfill({
     status: 200,
     contentType: 'application/json',
     body: JSON.stringify({ id: TICKET_ID, status: 'OPEN', symptom: 'GPU 온도 상승', supportChatRoomId: ROOM_ID, causeCandidates: [], upgradeCandidates: [] })
   }));
   await page.route('**/api/support/chat-sessions/current**', (route) => route.fulfill({
-    status: 200, contentType: 'application/json', body: JSON.stringify(detail)
+    status: 200, contentType: 'application/json', body: JSON.stringify(summary)
   }));
   await page.route(`**/api/support/chat-sessions/${ROOM_ID}`, (route) => {
     onDetailRead?.();

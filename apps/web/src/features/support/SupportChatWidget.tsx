@@ -686,6 +686,7 @@ function pollingInterval(detail?: SupportChatSessionDto) {
 
 function patchMessageEvent(existing: SupportChatSessionDto | undefined, event: SupportChatMessageEvent) {
   if (!existing) return existing;
+  const existingMessages = cachedMessages(existing);
   const canonical: SupportChatMessage = {
     id: event.messageId,
     clientMessageId: event.clientMessageId,
@@ -697,12 +698,12 @@ function patchMessageEvent(existing: SupportChatSessionDto | undefined, event: S
     pending: false,
     failed: false
   };
-  const duplicateIndex = existing.messages.findIndex((item) =>
+  const duplicateIndex = existingMessages.findIndex((item) =>
     item.id === event.messageId || Boolean(event.clientMessageId && item.clientMessageId === event.clientMessageId)
   );
   const messages = duplicateIndex >= 0
-    ? existing.messages.map((item, index) => index === duplicateIndex ? canonical : item)
-    : [...existing.messages, canonical];
+    ? existingMessages.map((item, index) => index === duplicateIndex ? canonical : item)
+    : [...existingMessages, canonical];
   const summary = roomSummaryToContact(event.room);
   return {
     ...existing,
@@ -731,7 +732,7 @@ function appendOptimisticMessage(
     pending: true
   };
   const append = (existing?: SupportChatSessionDto) => existing
-    ? { ...existing, messages: [...existing.messages, optimistic] }
+    ? { ...existing, messages: [...cachedMessages(existing), optimistic] }
     : existing;
   queryClient.setQueryData<SupportChatSessionDto | undefined>(['support-chat', authScope, sessionId], append);
   queryClient.setQueryData<SupportChatSessionDto | undefined>(
@@ -747,7 +748,7 @@ function markMessageFailed(
 ) {
   queryClient.setQueriesData<SupportChatSessionDto | undefined>(
     { queryKey: ['support-chat', authScope] },
-    (existing) => existing
+    (existing) => existing && Array.isArray(existing.messages)
       ? {
           ...existing,
           messages: existing.messages.map((item) => item.clientMessageId === clientMessageId
@@ -765,11 +766,16 @@ function shouldApplyDetail(incoming: SupportChatSessionDto, existing?: SupportCh
 }
 
 function detailTime(detail: SupportChatSessionDto) {
-  const lastMessage = detail.messages.length > 0 ? detail.messages[detail.messages.length - 1] : null;
+  const messages = cachedMessages(detail);
+  const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
   const value = detail.contact?.lastMessageAt ?? lastMessage?.createdAt ?? null;
   if (!value) return null;
   const time = Date.parse(value);
   return Number.isNaN(time) ? null : time;
+}
+
+function cachedMessages(detail: SupportChatSessionDto) {
+  return Array.isArray(detail.messages) ? detail.messages : [];
 }
 
 function isNearBottom(element: HTMLElement | null) {
