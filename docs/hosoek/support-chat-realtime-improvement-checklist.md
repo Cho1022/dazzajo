@@ -3,6 +3,8 @@
 작성일: 2026-07-06
 업데이트일: 2026-07-06
 
+> 역사 문서: 이 체크리스트는 2026-08-02 Spring STOMP 전환 이전 raw WebSocket/REST 전송 구현을 기록한다. 현재 계약은 `docs/load-test/support-chat-stomp-protocol.md`와 `docs/architecture/support-chat-stomp-handoff.md`를 따른다.
+
 현재 확인 기준:
 
 - 현재 워킹트리의 P0/P1 구현 코드와 추가된 회귀 테스트 기준으로 체크했다.

@@ -757,11 +757,11 @@ API smoke가 모두 통과한 경우에만 진행한다.
 
 브라우저 개발자 도구의 `Network → WS`에서 확인한다.
 
-- [ ] `wss://d2qhd7deuwmlln.cloudfront.net/ws/support-chat...` 연결
+- [ ] `wss://d2qhd7deuwmlln.cloudfront.net/ws/support-chat` 연결
 - [ ] HTTP `101 Switching Protocols`
-- [ ] 연결 후 5초 안에 ticket AUTH frame 처리
-- [ ] `CHAT_UPDATED` 또는 해당 화면의 정상 push
-- [ ] 관리자 queue WebSocket 연결
+- [ ] STOMP CONNECT `Authorization` header 인증과 `CONNECTED` frame
+- [ ] 방 topic의 `MESSAGE_CREATED` 또는 `ROOM_UPDATED` 정상 push
+- [ ] 관리자 `/topic/support-chat/admin-queue` 구독
 - [ ] PC Agent diagnosis WebSocket 연결
 - [ ] 연결이 65초를 넘어도 유지됨
 - [ ] application-level ping/pong 또는 실제 frame 동작
