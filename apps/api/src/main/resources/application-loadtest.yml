@@ -1,0 +1,85 @@
+management:
+  server:
+    port: 9091
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  health:
+    redis:
+      enabled: false
+    rabbit:
+      enabled: false
+  metrics:
+    distribution:
+      percentiles-histogram:
+        "[http.server.requests]": true
+        "[support.chat.message.processing]": true
+
+spring:
+  rabbitmq:
+    listener:
+      simple:
+        auto-startup: ${SPRING_RABBITMQ_LISTENER_SIMPLE_AUTO_STARTUP:false}
+
+buildgraph:
+  scheduling:
+    enabled: ${BUILDGRAPH_SCHEDULING_ENABLED:false}
+  home:
+    cache:
+      prewarm:
+        enabled: ${BUILDGRAPH_HOME_CACHE_PREWARM_ENABLED:false}
+  auth:
+    refresh-token-cleanup:
+      enabled: ${BUILDGRAPH_AUTH_REFRESH_TOKEN_CLEANUP_ENABLED:false}
+      run-on-startup: ${BUILDGRAPH_AUTH_REFRESH_TOKEN_CLEANUP_RUN_ON_STARTUP:false}
+
+agent:
+  worker:
+    enabled: ${AGENT_WORKER_ENABLED:false}
+
+rag:
+  vector:
+    enabled: ${RAG_VECTOR_ENABLED:false}
+    requirement-parse-enabled: ${RAG_VECTOR_REQUIREMENT_PARSE_ENABLED:false}
+    build-recommend-enabled: ${RAG_VECTOR_BUILD_RECOMMEND_ENABLED:false}
+    as-analyze-enabled: ${RAG_VECTOR_AS_ANALYZE_ENABLED:false}
+    public-search-enabled: ${RAG_VECTOR_PUBLIC_SEARCH_ENABLED:false}
+  embedding:
+    backfill-on-startup: ${RAG_EMBEDDING_BACKFILL_ON_STARTUP:false}
+
+ai:
+  build-chat:
+    cache:
+      enabled: ${BUILD_CHAT_CACHE_ENABLED:false}
+      prewarm:
+        enabled: ${BUILD_CHAT_CACHE_PREWARM_ENABLED:false}
+    semantic-cache:
+      enabled: ${BUILD_CHAT_SEMANTIC_CACHE_ENABLED:false}
+    tier-snapshot:
+      enabled: ${BUILD_CHAT_TIER_SNAPSHOT_ENABLED:false}
+
+recommendation:
+  events:
+    worker:
+      enabled: ${RECOMMENDATION_EVENTS_WORKER_ENABLED:false}
+  reranker:
+    enabled: ${RECOMMENDATION_RERANKER_ENABLED:false}
+    shadow-enabled: ${RECOMMENDATION_RERANKER_SHADOW_ENABLED:false}
+  auto-retrain:
+    enabled: ${RECOMMENDATION_AUTO_RETRAIN_ENABLED:false}
+  drift:
+    enabled: ${RECOMMENDATION_DRIFT_ENABLED:false}
+    retrain-on-severe: ${RECOMMENDATION_DRIFT_RETRAIN_ON_SEVERE:false}
+
+part:
+  price-refresh:
+    enabled: ${PART_PRICE_REFRESH_ENABLED:false}
+    worker:
+      enabled: ${PART_PRICE_REFRESH_WORKER_ENABLED:false}
+  danawa-refresh:
+    enabled: ${PART_DANAWA_REFRESH_ENABLED:false}
+  danawa-trend-refresh:
+    enabled: ${PART_DANAWA_TREND_REFRESH_ENABLED:false}
+  manufacturer-release-intake:
+    enabled: ${PART_MANUFACTURER_RELEASE_INTAKE_ENABLED:false}
