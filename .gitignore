@@ -42,3 +42,9 @@ infra/k6/reports/
 # 기획 및 디자인 문서 무시
 DESIGN.md
 PRODUCT.md
+# Support-chat Gatling runtime artifacts and reports
+loadtest/gatling/.gradle/
+loadtest/gatling/build/
+loadtest/gatling/runtime/
+loadtest/results/*
+!loadtest/results/.gitkeep
