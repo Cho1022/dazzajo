@@ -9,6 +9,7 @@ apps/api/bin/
 .env.prod
 .env.prod.local
 infra/loadtest/.env.loadtest
+loadtest/gatling/.env.loadtest
 .DS_Store
 target/
 __pycache__/

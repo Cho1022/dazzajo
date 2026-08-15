@@ -10,3 +10,6 @@ Baseline을 실행한다. 애플리케이션 튜닝값은 포함하지 않는다
 
 실행 순서와 안전 조건은
 [`docs/load-test/gatling-support-chat.md`](../../docs/load-test/gatling-support-chat.md)를 따른다.
+
+반복 실행용 짧은 명령은
+[`docs/load-test/support-chat-operator-runbook.md`](../../docs/load-test/support-chat-operator-runbook.md)에 정리되어 있다.
