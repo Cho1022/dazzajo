@@ -1908,6 +1908,7 @@ Owner: 4번 사용자-관리자 상담방
 | `role` | `VARCHAR(30)` | no | - | `USER`, `ADMIN`, `SYSTEM` |
 | `content` | `TEXT` | no | - | 사용자, 관리자, 시스템 메시지 본문 |
 | `sender_user_id` | `BIGINT` | yes | `users.id` | 실제 메시지를 보낸 사용자 또는 관리자 (`SYSTEM`은 `NULL`) |
+| `client_message_id` | `UUID` | yes | - | STOMP 클라이언트가 생성한 발신자별 멱등키. 기존/SYSTEM 메시지는 `NULL` 가능 |
 | `created_at` | `TIMESTAMPTZ` | no | - | 생성 시각 |
 
 Index:
@@ -1916,11 +1917,13 @@ Index:
 - index: `support_chat_messages.room_id`
 - index: `support_chat_messages.sender_user_id`
 - index: `support_chat_messages.created_at`
+- partial unique: `(sender_user_id, client_message_id) WHERE client_message_id IS NOT NULL`
 
 MVP 기준 결정값:
 
 - `role=USER` / `role=ADMIN` 메시지는 `sender_user_id`를 저장한다.
 - `role=SYSTEM` 메시지는 상담방 생성 안내 같은 시스템 메시지이며 `sender_user_id`는 `NULL`이다.
+- 같은 발신자의 동일 `client_message_id` 재전송은 새 메시지와 unread 증가를 만들지 않고 기존 메시지를 canonical event로 반환한다.
 - 상세 조회는 최근 100개 메시지만 시간순으로 반환한다.
 
 ### llm_generations

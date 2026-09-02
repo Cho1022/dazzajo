@@ -670,19 +670,17 @@ Support Chat Rooms는 로그인 사용자와 관리자가 AS 티켓을 기준으
 |---|---|---|---|---|---|---|
 | `GET` | `/api/support/chat-sessions/current` | USER | 4번 | `?asTicketId=4aef8ef7-1dc7-45d1-bfc2-bb0cfdaf7f8a` optional | `{ "contact": { "id": "7c2f8f17-8f18-4d10-bcd1-9d20d1c71a01", "asTicketId": "4aef8ef7-1dc7-45d1-bfc2-bb0cfdaf7f8a", "ticketStatus": "OPEN", "title": "AS 상담방", "symptom": "게임 중 프레임 급락", "userUnreadCount": 0, "adminUnreadCount": 1, "canSendMessage": true }, "messages": [], "supportNewPath": "/support/new", "pollingIntervalMs": 5000 }` | `support_chat_rooms`, `support_chat_messages`, `as_tickets`, `users` |
 | `GET` | `/api/support/chat-sessions/{id}` | USER | 4번 | - | `SupportChatSessionResponse` | `support_chat_rooms`, `support_chat_messages`, `as_tickets`, `users` |
-| `POST` | `/api/support/chat-sessions/{id}/messages` | USER | 4번 | `{ "content": "담당자님, 재부팅 후에도 같은 증상이 있습니다." }` | `SupportChatSessionResponse` | `support_chat_messages`, `support_chat_rooms` |
 | `PUT` | `/api/support/chat-sessions/{id}/visit-reservation` | USER | 4번 | `{ "scheduledAt": "2026-07-10T14:30:00+09:00", "addressSnapshot": "서울시 강남구" }` | `SupportChatSessionResponse` | `visit_support_reservations`, `support_chat_messages`, `support_chat_rooms` |
-| `POST` | `/api/support/chat-sessions/{id}/ws-ticket` | USER | 4번 | - | `{ "ticket": "opaque-token", "expiresAt": "2026-07-06T10:01:00Z", "expiresInSeconds": 60 }` | Redis `support-chat:ws-ticket:*`, `support_chat_rooms` |
 | `GET` | `/api/admin/support/chat-sessions` | ADMIN | 4번 | - | `{ "items": [{ "id": "7c2f8f17-8f18-4d10-bcd1-9d20d1c71a01", "asTicketId": "4aef8ef7-1dc7-45d1-bfc2-bb0cfdaf7f8a", "ticketStatus": "OPEN", "adminUnreadCount": 1, "user": { "id": "c6d75f0c-0f57-4d1c-a8b2-a4079dcd40fd", "email": "user@example.com" } }], "pollingIntervalMs": 5000 }` | `support_chat_rooms`, `as_tickets`, `users` |
-| `POST` | `/api/admin/support/chat-sessions/ws-ticket` | ADMIN | 4번 | - | `{ "ticket": "opaque-token", "expiresAt": "2026-07-06T10:01:00Z", "expiresInSeconds": 60 }` | Redis `support-chat:ws-ticket:*` |
 | `GET` | `/api/admin/support/chat-sessions/{id}` | ADMIN | 4번 | `?markRead=false` optional | `SupportChatSessionResponse` | `support_chat_rooms`, `support_chat_messages`, `as_tickets`, `users` |
 | `DELETE` | `/api/admin/support/chat-sessions/{id}` | ADMIN | 4번 | - | `SupportChatSessionResponse`, `contact.status=ARCHIVED`, `canSendMessage=false` | `support_chat_rooms`, `support_chat_messages`, `as_tickets` |
-| `POST` | `/api/admin/support/chat-sessions/{id}/messages` | ADMIN | 4번 | `{ "content": "담당자가 확인 중입니다. 최근 재현 시각을 알려주세요." }` | `SupportChatSessionResponse` | `support_chat_messages`, `support_chat_rooms`, `as_tickets` |
 | `PUT` | `/api/admin/support/chat-sessions/{id}/visit-reservation` | ADMIN | 4번 | `{ "scheduledAt": "2026-07-10T14:30:00+09:00", "technicianNote": "방문 전 연락" }` | `SupportChatSessionResponse` | `visit_support_reservations`, `support_chat_messages`, `support_chat_rooms` |
 | `DELETE` | `/api/admin/support/chat-sessions/{id}/visit-reservation` | ADMIN | 4번 | - | `SupportChatSessionResponse` | `visit_support_reservations`, `support_chat_messages`, `support_chat_rooms` |
-| `POST` | `/api/admin/support/chat-sessions/{id}/ws-ticket` | ADMIN | 4번 | - | `{ "ticket": "opaque-token", "expiresAt": "2026-07-06T10:01:00Z", "expiresInSeconds": 60 }` | Redis `support-chat:ws-ticket:*`, `support_chat_rooms` |
-| WebSocket | `/ws/support-chat?mode=user&sessionId={id}` | USER/ADMIN | 4번 | 방 상세 전용. 연결 후 5초 안에 `{ "type": "AUTH", "ticket": "opaque-token" }`. 수신 전용. client `MESSAGE`는 저장하지 않고 `{ "type": "ERROR", "code": "WS_MESSAGE_DISABLED", "retryable": false }` 반환 | `{ "type": "CHAT_UPDATED", "detail": SupportChatSessionResponse }` | `support_chat_rooms` |
-| WebSocket | `/ws/admin/support-chat-queue` | ADMIN | 4번 | 관리자 상담방 목록 전용. 연결 후 5초 안에 `{ "type": "AUTH", "ticket": "opaque-token" }`. URL query string에 token/ticket을 넣지 않는다. | `SUPPORT_CHAT_QUEUE_READY`, `SUPPORT_CHAT_QUEUE_UPDATED`, `SUPPORT_CHAT_QUEUE_REMOVED` | `support_chat_rooms` |
+| STOMP CONNECT | `/ws/support-chat` | USER/ADMIN | 4번 | native header `Authorization: Bearer {JWT}`. SockJS 미사용 | `CONNECTED` 또는 안전한 `ERROR` frame | `users` 읽기 |
+| STOMP SEND | `/app/support-chat/messages` | USER/ADMIN | 4번 | `{ "roomId": "7c2f8f17-8f18-4d10-bcd1-9d20d1c71a01", "clientMessageId": "6dff10b8-c102-438c-b9a7-cd74565498d5", "content": "재부팅 후에도 같은 증상입니다." }` | 해당 방 topic에 `MESSAGE_CREATED` canonical event | `support_chat_messages`, `support_chat_rooms`, `as_tickets` |
+| STOMP SUBSCRIBE | `/topic/support-chat/rooms/{roomId}` | 방 소유 USER/ADMIN | 4번 | room UUID | `MESSAGE_CREATED`, `ROOM_UPDATED` | `support_chat_rooms` 읽기 |
+| STOMP SUBSCRIBE | `/topic/support-chat/admin-queue` | ADMIN | 4번 | - | `ROOM_UPDATED`, `ROOM_REMOVED` | `support_chat_rooms`, `as_tickets` 읽기 |
+| STOMP SUBSCRIBE | `/user/queue/support-chat-errors` | USER/ADMIN | 4번 | - | `{ "clientMessageId": "...", "code": "SUPPORT_CHAT_INVALID_MESSAGE", "message": "...", "retryable": false }` | - |
 
 Support Chat Rooms 규칙:
 
@@ -694,8 +692,9 @@ Support Chat Rooms 규칙:
 - `asTicketId`를 지정한 `GET /api/support/chat-sessions/current`는 로그인 사용자의 AS 티켓인지 확인하고, 티켓이 있으면 active 상담방을 보장한다.
 - `POST /api/as-tickets`로 AS 티켓이 생성되면 같은 transaction에서 active 상담방과 최초 `SYSTEM` 메시지를 생성한다.
 - `POST /api/as-tickets`, `POST /api/agent/log-uploads`, `POST /api/agent/as-requests`는 기존 진행 중 상담방을 닫거나 재사용하지 않고 새 티켓별 상담방을 생성한다. 동일 진단·업로드 재시도는 각 endpoint의 idempotency key 정책으로 중복 생성을 막는다.
-- `POST /api/support/chat-sessions/{id}/messages`는 사용자 본인 티켓 상담방에만 쓸 수 있으며, 본인 소유가 아니면 `404 NOT_FOUND`다.
-- `POST /api/admin/support/chat-sessions/{id}/messages`는 관리자 권한이 필요하며, 첫 관리자 응답 시 `as_tickets.assigned_admin_id`가 비어 있으면 현재 관리자로 배정한다.
+- 상담 메시지는 REST로 전송하지 않는다. USER와 ADMIN 모두 STOMP `/app/support-chat/messages`만 사용하며 서버는 CONNECT principal로 발신자를 결정한다.
+- USER는 본인 티켓 상담방에만 SEND/SUBSCRIBE할 수 있고 ADMIN은 매 구독/전송 시 최신 관리자 권한을 재확인한다. 첫 관리자 응답 시 `as_tickets.assigned_admin_id`가 비어 있으면 현재 관리자로 배정한다.
+- `clientMessageId`는 UUID이며 발신자별 멱등키다. 같은 발신자가 같은 ID를 재전송하면 새 row와 unread 증가 없이 기존 canonical `MESSAGE_CREATED` event를 다시 게시한다.
 - `content`는 trim 후 1자 이상 2000자 이하만 허용한다.
 - `CLOSED`, `CANCELLED` 티켓 상담방에는 새 메시지를 보낼 수 없고 `409 CONFLICT_STATE`를 반환한다.
 - 사용자 메시지는 `adminUnreadCount`를 증가시키고, 관리자 메시지는 `userUnreadCount`를 증가시킨다. REST 상세 조회는 기본적으로 조회자 쪽 unread count를 0으로 초기화한다. 관리자 상세는 `markRead=false`로 읽음 처리 없이 조회할 수 있고, WebSocket push snapshot은 unread count를 초기화하지 않는다.
@@ -703,12 +702,12 @@ Support Chat Rooms 규칙:
 - 관리자 명시 삭제로 `ARCHIVED`된 상담방은 최신 진행 중 상담 조회에서 제외된다. 새 AS 티켓 접수는 다른 방의 활성 여부와 무관하게 가능하다.
 - `GET /api/admin/support/chat-sessions`는 `as_tickets.status`가 `CLOSED`, `CANCELLED`가 아닌 상담방만 최근순 최대 100개까지 반환한다.
 - 상세 조회의 `messages`는 최근 100개만 시간순으로 반환한다.
-- WebSocket은 실시간 갱신용이며 클라이언트는 연결 실패 시 REST polling(`pollingIntervalMs`)으로 fallback한다. 소켓이 연결된 상태에서도 낮은 빈도의 fallback polling을 유지한다.
-- WebSocket 인증은 query string JWT를 쓰지 않는다. REST `ws-ticket` endpoint가 Redis에 60초 TTL, 1회 사용 ticket을 저장하고, WebSocket 연결 후 첫 `AUTH` frame으로 소비한다. Redis 장애 시 ticket 발급은 `503 UPSTREAM_ERROR`이며 클라이언트는 REST polling으로 fallback한다.
-- 관리자 상담방 목록은 `/ws/admin/support-chat-queue`로 별도 구독한다. 인증 성공 시 `{ "type": "SUPPORT_CHAT_QUEUE_READY", "pollingIntervalMs": 5000 }`를 보내고, 목록에 포함되는 방 변경은 `{ "type": "SUPPORT_CHAT_QUEUE_UPDATED", "contact": SupportChatContact }`, CLOSED/CANCELLED/삭제 등 목록에서 빠지는 방은 `{ "type": "SUPPORT_CHAT_QUEUE_REMOVED", "id": "..." }`로 보낸다.
+- STOMP는 실시간 전송과 증분 갱신용이다. 연결 중에는 주기 polling을 중단하고, 연결 실패/오프라인일 때만 REST polling(`pollingIntervalMs`)으로 fallback한다. 재연결 직후에는 REST 상세/목록을 다시 조회해 끊긴 구간을 복구한다.
+- 인증 정보는 query string에 넣지 않고 STOMP CONNECT native `Authorization` header로 전달한다. 기존 REST `ws-ticket` endpoint와 raw `AUTH` frame은 제거한다.
+- 관리자 목록은 같은 `/ws/support-chat` STOMP 연결에서 `/topic/support-chat/admin-queue`를 구독하며, 목록 patch는 `ROOM_UPDATED`, 제외/삭제는 `ROOM_REMOVED` 증분 event로 받는다.
 - REST CORS와 WebSocket allowed origin은 공통 `buildgraph.cors.allowed-origins` property를 사용한다. 기본값은 `http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174`이고 배포 환경에서는 명시 설정해야 한다.
-- 현재 WebSocket session map은 API JVM 메모리 기반이다. P2에서는 단일 API 인스턴스 push만 보장하며, 여러 API 인스턴스에서 다른 인스턴스에 붙은 소켓 push는 누락될 수 있다. 이 경우 `pollingIntervalMs` REST polling이 복구 경로이고, Redis pub/sub fan-out은 다음 단계 과제다.
-- 메시지는 REST `POST .../messages` 성공 시에만 저장된다. 저장 후 서버는 해당 상담방에 연결된 모든 WebSocket 세션에 `CHAT_UPDATED`를 push하고, 관리자 queue 세션에는 단일 방 patch를 push한다. 각 방 상세 세션은 자신의 모드(user/admin) 기준 unread-safe `SupportChatSessionResponse` snapshot을 받는다.
+- 현재 simple broker는 API JVM 메모리 기반이다. 여러 API 인스턴스에서는 외부 broker relay와 세션 고정/공유 전략이 필요하며, 그 전까지 재연결 REST 재동기화가 누락 복구 경로다.
+- 메시지는 DB commit 후 해당 방 topic에 canonical `MESSAGE_CREATED` event를 게시하고, 관리자 queue에는 `ROOM_UPDATED`를 게시한다. 발신자도 같은 방 topic을 구독하므로 optimistic message를 canonical event로 치환한다. 게시 실패는 커밋을 되돌리지 않고 로그/메트릭과 재동기화 경로로 복구한다.
 - 방문 지원 예약은 `visit_support_reservations.scheduled_at`에 정확한 시작 시각을 저장하고, 기존 `preferred_date`, `time_slot`도 호환용으로 함께 채운다. 사용자는 요청/변경 요청만 가능하고(`REQUESTED`, `RESCHEDULE_REQUESTED`), 관리자는 확정/변경(`SCHEDULED`)과 취소(`CANCELLED`)를 수행한다. 취소는 관리자만 가능하다.
 - 한 AS 티켓에는 active 방문 예약 1건만 유지한다. active 상태는 `REQUESTED`, `RESCHEDULE_REQUESTED`, `SCHEDULED`, `VISIT_IN_PROGRESS`다. 예약 생성/변경은 티켓 row를 `FOR UPDATE`로 잠그고, 변경 사실을 `SYSTEM` 메시지로 남긴 뒤 기존 room detail/queue WebSocket으로 push한다.
 

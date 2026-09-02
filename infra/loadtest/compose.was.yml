@@ -1,0 +1,17 @@
+services:
+  was:
+    image: ${LOADTEST_WAS_IMAGE:?LOADTEST_WAS_IMAGE is required}
+    restart: unless-stopped
+    stop_grace_period: 40s
+    env_file:
+      - ./.env.loadtest
+    environment:
+      SPRING_PROFILES_ACTIVE: loadtest
+    ports:
+      - "8080:8080"
+      - "9091:9091"
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"

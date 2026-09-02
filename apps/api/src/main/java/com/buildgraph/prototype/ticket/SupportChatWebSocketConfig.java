@@ -1,52 +1,42 @@
 package com.buildgraph.prototype.ticket;
 
-import com.buildgraph.prototype.agent.PcAgentDiagnosisWebSocketHandler;
 import com.buildgraph.prototype.common.BuildGraphCorsProperties;
-import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.web.socket.config.annotation.EnableWebSocket;
-import org.springframework.web.socket.config.annotation.WebSocketConfigurer;
-import org.springframework.web.socket.config.annotation.WebSocketHandlerRegistry;
-import org.springframework.web.socket.server.standard.ServletServerContainerFactoryBean;
+import org.springframework.messaging.simp.config.ChannelRegistration;
+import org.springframework.messaging.simp.config.MessageBrokerRegistry;
+import org.springframework.web.socket.config.annotation.EnableWebSocketMessageBroker;
+import org.springframework.web.socket.config.annotation.StompEndpointRegistry;
+import org.springframework.web.socket.config.annotation.WebSocketMessageBrokerConfigurer;
 
 @Configuration
-@EnableWebSocket
-public class SupportChatWebSocketConfig implements WebSocketConfigurer {
-    // PC Agent 진단 결과 프레임은 측정 근거를 담아 컨테이너 기본값(8KB)을 쉽게 넘긴다.
-    // 한계를 넘으면 컨테이너가 세션을 끊어버려 Agent가 재접속 루프에 빠진다.
-    private static final int MAX_TEXT_MESSAGE_BUFFER_BYTES = 512 * 1024;
-    private final SupportChatWebSocketHandler supportChatWebSocketHandler;
-    private final AdminSupportChatQueueWebSocketHandler adminSupportChatQueueWebSocketHandler;
-    private final PcAgentDiagnosisWebSocketHandler pcAgentDiagnosisWebSocketHandler;
-    private final String[] allowedOriginPatterns;
+@EnableWebSocketMessageBroker
+public class SupportChatWebSocketConfig implements WebSocketMessageBrokerConfigurer {
+    private final SupportChatInboundChannelInterceptor inboundChannelInterceptor;
+    private final String[] allowedOrigins;
 
     public SupportChatWebSocketConfig(
-            SupportChatWebSocketHandler supportChatWebSocketHandler,
-            AdminSupportChatQueueWebSocketHandler adminSupportChatQueueWebSocketHandler,
-            PcAgentDiagnosisWebSocketHandler pcAgentDiagnosisWebSocketHandler,
+            SupportChatInboundChannelInterceptor inboundChannelInterceptor,
             BuildGraphCorsProperties corsProperties
     ) {
-        this.supportChatWebSocketHandler = supportChatWebSocketHandler;
-        this.adminSupportChatQueueWebSocketHandler = adminSupportChatQueueWebSocketHandler;
-        this.pcAgentDiagnosisWebSocketHandler = pcAgentDiagnosisWebSocketHandler;
-        this.allowedOriginPatterns = corsProperties.allowedOrigins();
+        this.inboundChannelInterceptor = inboundChannelInterceptor;
+        this.allowedOrigins = corsProperties.allowedOrigins();
     }
 
     @Override
-    public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
-        registry.addHandler(supportChatWebSocketHandler, "/ws/support-chat")
-                .setAllowedOrigins(allowedOriginPatterns);
-        registry.addHandler(adminSupportChatQueueWebSocketHandler, "/ws/admin/support-chat-queue")
-                .setAllowedOrigins(allowedOriginPatterns);
-        registry.addHandler(pcAgentDiagnosisWebSocketHandler, "/ws/pc-agent/diagnosis")
-                .setAllowedOriginPatterns("*");
+    public void registerStompEndpoints(StompEndpointRegistry registry) {
+        registry.addEndpoint("/ws/support-chat")
+                .setAllowedOrigins(allowedOrigins);
     }
 
-    @Bean
-    public ServletServerContainerFactoryBean webSocketContainer() {
-        ServletServerContainerFactoryBean container = new ServletServerContainerFactoryBean();
-        container.setMaxTextMessageBufferSize(MAX_TEXT_MESSAGE_BUFFER_BYTES);
-        container.setMaxBinaryMessageBufferSize(MAX_TEXT_MESSAGE_BUFFER_BYTES);
-        return container;
+    @Override
+    public void configureMessageBroker(MessageBrokerRegistry registry) {
+        registry.setApplicationDestinationPrefixes("/app");
+        registry.enableSimpleBroker("/topic", "/queue");
+        registry.setUserDestinationPrefix("/user");
+    }
+
+    @Override
+    public void configureClientInboundChannel(ChannelRegistration registration) {
+        registration.interceptors(inboundChannelInterceptor);
     }
 }

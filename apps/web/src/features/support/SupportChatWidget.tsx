@@ -5,14 +5,13 @@ import { LifeBuoy, MessageCircle, Send, X } from 'lucide-react';
 import { AUTH_CHANGED_EVENT, getCachedAuthUser, getToken } from '../../lib/api';
 import { AI_BUILD_ASSISTANT_CLOSE_EVENT, AI_BUILD_ASSISTANT_OPEN_EVENT, AI_BUILD_ASSISTANT_TOGGLE_EVENT, SUPPORT_CHAT_CLOSE_EVENT, SUPPORT_CHAT_OPEN_EVENT } from '../../lib/events';
 import { getCurrentUser } from '../auth/authApi';
-import { getCurrentSupportChat, getSupportChatSession, openSupportChatSocket, postSupportChatMessage, putSupportChatVisitReservation, type SupportChatSocket } from './supportChatApi';
+import { getCurrentSupportChat, getSupportChatSession, openSupportChatSocket, putSupportChatVisitReservation, roomSummaryToContact, type SupportChatMessageEvent, type SupportChatSocket } from './supportChatApi';
 import { SupportChatMessageContent } from './SupportChatMessageContent';
 import type { SupportChatMessage, SupportChatSessionDto, VisitSupportReservation } from './types';
 
 const DEFAULT_POLL_MS = 5000;
 // 닫힌 위젯의 배지 갱신용 기본 폴링 — 서버 지시(pollingIntervalMs)가 없을 때만 적용된다.
 const CLOSED_WIDGET_DEFAULT_POLL_MS = 30_000;
-const SOCKET_RECONNECT_DELAYS_MS = [1000, 2000, 5000, 10000];
 const SUPPORT_CHAT_MOBILE_QUERY = '(max-width: 767px)';
 type SocketStatus = 'polling' | 'connecting' | 'reconnecting' | 'connected' | 'disconnected';
 
@@ -73,7 +72,9 @@ export function SupportChatWidget() {
     queryKey: ['support-chat', authScope, sessionId],
     queryFn: () => getSupportChatSession(sessionId as string),
     enabled: Boolean(open && sessionId),
-    refetchInterval: (query) => open && sessionId ? pollingInterval(query.state.data as SupportChatSessionDto | undefined) : false,
+    refetchInterval: (query) => open && sessionId && socketStatus !== 'connected'
+      ? pollingInterval(query.state.data as SupportChatSessionDto | undefined)
+      : false,
     retry: false
   });
 
@@ -91,18 +92,18 @@ export function SupportChatWidget() {
     }
   }, [authScope, queryClient, routeTicketId]);
 
-  const sendMutation = useMutation({
-    mutationFn: (content: string) => postSupportChatMessage(sessionId as string, content),
-    onSuccess: (detail) => {
-      forceScrollToBottomRef.current = true;
-      setMessage('');
-      setSendError(null);
-      updateChatCache(detail);
-    },
-    onError: (error) => {
-      setSendError(errorMessage(error));
-    }
-  });
+  const applyMessageEvent = useCallback((event: SupportChatMessageEvent) => {
+    wasAtBottomRef.current = isNearBottom(messagesRef.current);
+    const patch = (existing?: SupportChatSessionDto) => patchMessageEvent(existing, event);
+    queryClient.setQueryData<SupportChatSessionDto | undefined>(
+      ['support-chat', authScope, 'current', routeTicketId ?? 'latest'],
+      patch
+    );
+    queryClient.setQueryData<SupportChatSessionDto | undefined>(
+      ['support-chat', authScope, event.roomId],
+      patch
+    );
+  }, [authScope, queryClient, routeTicketId]);
 
   const visitReservationMutation = useMutation({
     mutationFn: () => putSupportChatVisitReservation(sessionId as string, {
@@ -122,7 +123,7 @@ export function SupportChatWidget() {
   const contact = activeChat?.contact ?? null;
   const messages = activeChat?.messages ?? [];
   const messageCount = messages.length;
-  const canSend = Boolean(contact?.canSendMessage && message.trim() && !sendMutation.isPending);
+  const canSend = Boolean(contact?.canSendMessage && message.trim() && socketStatus === 'connected');
   const canRequestVisit = Boolean(contact?.canSendMessage && visitScheduledAt && !visitReservationMutation.isPending);
 
   useEffect(() => {
@@ -196,58 +197,43 @@ export function SupportChatWidget() {
       return undefined;
     }
     let disposed = false;
-    let reconnectTimer: ReturnType<typeof window.setTimeout> | null = null;
-    let reconnectAttempt = 0;
-    let activeConnectionId = 0;
-
-    const clearReconnectTimer = () => {
-      if (reconnectTimer !== null) {
-        window.clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-      }
-    };
-    const scheduleReconnect = () => {
-      if (disposed) return;
-      if (reconnectTimer !== null) return;
-      setSocketStatus('reconnecting');
-      const delay = SOCKET_RECONNECT_DELAYS_MS[Math.min(reconnectAttempt, SOCKET_RECONNECT_DELAYS_MS.length - 1)];
-      reconnectAttempt += 1;
-      reconnectTimer = window.setTimeout(() => {
-        reconnectTimer = null;
-        connect();
-      }, delay);
-    };
     const connect = async () => {
       if (disposed) return;
-      const connectionId = ++activeConnectionId;
-      setSocketStatus(reconnectAttempt > 0 ? 'reconnecting' : 'connecting');
+      setSocketStatus('connecting');
       try {
         const socket = await openSupportChatSocket({
           mode: 'user',
           sessionId,
           onOpen: () => {
-            if (disposed || activeConnectionId !== connectionId) return;
-            reconnectAttempt = 0;
+            if (disposed) return;
             setSocketStatus('connected');
+            void queryClient.invalidateQueries({ queryKey: ['support-chat', authScope, sessionId] });
+            void queryClient.invalidateQueries({ queryKey: ['support-chat', authScope, 'current'] });
           },
           onClose: () => {
-            if (disposed || activeConnectionId !== connectionId) return;
-            socketRef.current = null;
-            scheduleReconnect();
+            if (disposed) return;
+            setSocketStatus('reconnecting');
           },
           onError: () => {
-            if (disposed || activeConnectionId !== connectionId) return;
-            setSocketStatus('disconnected');
-            scheduleReconnect();
+            if (disposed) return;
+            setSocketStatus('reconnecting');
           },
           onSocketError: (error) => {
             if (error.message) {
               setSendError(error.message);
             }
+            if (error.clientMessageId) {
+              markMessageFailed(queryClient, authScope, error.clientMessageId);
+            }
           },
-          onDetail: updateChatCache
+          onMessage: applyMessageEvent,
+          onRoom: (event) => {
+            if (event.refreshRequired) {
+              void queryClient.invalidateQueries({ queryKey: ['support-chat', authScope, sessionId] });
+            }
+          }
         });
-        if (disposed || activeConnectionId !== connectionId) {
+        if (disposed) {
           socket?.close();
           return;
         }
@@ -256,21 +242,19 @@ export function SupportChatWidget() {
           setSocketStatus('polling');
         }
       } catch (error) {
-        if (disposed || activeConnectionId !== connectionId) return;
+        if (disposed) return;
         setSocketStatus('disconnected');
-        scheduleReconnect();
       }
     };
 
     connect();
     return () => {
       disposed = true;
-      clearReconnectTimer();
       socketRef.current?.close();
       socketRef.current = null;
       setSocketStatus('polling');
     };
-  }, [open, sessionId, updateChatCache]);
+  }, [applyMessageEvent, authScope, open, queryClient, sessionId]);
 
   useEffect(() => {
     if (!open || !messagesRef.current) return;
@@ -301,7 +285,15 @@ export function SupportChatWidget() {
     if (!canSend || !sessionId) return;
     const outgoing = message.trim();
     setSendError(null);
-    sendMutation.mutate(outgoing);
+    try {
+      const clientMessageId = crypto.randomUUID();
+      appendOptimisticMessage(queryClient, authScope, sessionId, routeTicketId, clientMessageId, outgoing, 'USER');
+      socketRef.current?.sendMessage(outgoing, clientMessageId);
+      forceScrollToBottomRef.current = true;
+      setMessage('');
+    } catch (error) {
+      setSendError(errorMessage(error));
+    }
   }
 
   function submitVisitReservation(event: FormEvent) {
@@ -692,6 +684,81 @@ function pollingInterval(detail?: SupportChatSessionDto) {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : DEFAULT_POLL_MS;
 }
 
+function patchMessageEvent(existing: SupportChatSessionDto | undefined, event: SupportChatMessageEvent) {
+  if (!existing) return existing;
+  const existingMessages = cachedMessages(existing);
+  const canonical: SupportChatMessage = {
+    id: event.messageId,
+    clientMessageId: event.clientMessageId,
+    role: event.senderRole,
+    content: event.content,
+    senderId: event.senderId,
+    senderName: event.senderName,
+    createdAt: event.createdAt,
+    pending: false,
+    failed: false
+  };
+  const duplicateIndex = existingMessages.findIndex((item) =>
+    item.id === event.messageId || Boolean(event.clientMessageId && item.clientMessageId === event.clientMessageId)
+  );
+  const messages = duplicateIndex >= 0
+    ? existingMessages.map((item, index) => index === duplicateIndex ? canonical : item)
+    : [...existingMessages, canonical];
+  const summary = roomSummaryToContact(event.room);
+  return {
+    ...existing,
+    contact: existing.contact
+      ? { ...existing.contact, ...summary, visitReservation: existing.contact.visitReservation }
+      : summary,
+    messages
+  };
+}
+
+function appendOptimisticMessage(
+  queryClient: ReturnType<typeof useQueryClient>,
+  authScope: string,
+  sessionId: string,
+  routeTicketId: string | null,
+  clientMessageId: string,
+  content: string,
+  role: 'USER' | 'ADMIN'
+) {
+  const optimistic: SupportChatMessage = {
+    id: `optimistic:${clientMessageId}`,
+    clientMessageId,
+    role,
+    content,
+    createdAt: new Date().toISOString(),
+    pending: true
+  };
+  const append = (existing?: SupportChatSessionDto) => existing
+    ? { ...existing, messages: [...cachedMessages(existing), optimistic] }
+    : existing;
+  queryClient.setQueryData<SupportChatSessionDto | undefined>(['support-chat', authScope, sessionId], append);
+  queryClient.setQueryData<SupportChatSessionDto | undefined>(
+    ['support-chat', authScope, 'current', routeTicketId ?? 'latest'],
+    append
+  );
+}
+
+function markMessageFailed(
+  queryClient: ReturnType<typeof useQueryClient>,
+  authScope: string,
+  clientMessageId: string
+) {
+  queryClient.setQueriesData<SupportChatSessionDto | undefined>(
+    { queryKey: ['support-chat', authScope] },
+    (existing) => existing && Array.isArray(existing.messages)
+      ? {
+          ...existing,
+          messages: existing.messages.map((item) => item.clientMessageId === clientMessageId
+            ? { ...item, pending: false, failed: true }
+            : item)
+        }
+      : existing
+  );
+}
+
 function shouldApplyDetail(incoming: SupportChatSessionDto, existing?: SupportChatSessionDto) {
   const incomingTime = detailTime(incoming);
   const existingTime = existing ? detailTime(existing) : null;
@@ -699,11 +766,16 @@ function shouldApplyDetail(incoming: SupportChatSessionDto, existing?: SupportCh
 }
 
 function detailTime(detail: SupportChatSessionDto) {
-  const lastMessage = detail.messages.length > 0 ? detail.messages[detail.messages.length - 1] : null;
+  const messages = cachedMessages(detail);
+  const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
   const value = detail.contact?.lastMessageAt ?? lastMessage?.createdAt ?? null;
   if (!value) return null;
   const time = Date.parse(value);
   return Number.isNaN(time) ? null : time;
+}
+
+function cachedMessages(detail: SupportChatSessionDto) {
+  return Array.isArray(detail.messages) ? detail.messages : [];
 }
 
 function isNearBottom(element: HTMLElement | null) {

@@ -18,8 +18,7 @@ import com.buildgraph.prototype.build.BuildGraphLayoutService;
 import com.buildgraph.prototype.price.PriceQueryService;
 import com.buildgraph.prototype.rag.RagEmbeddingService;
 import com.buildgraph.prototype.rag.RagQueryService;
-import com.buildgraph.prototype.ticket.AdminSupportChatQueueWebSocketHandler;
-import com.buildgraph.prototype.ticket.SupportChatWebSocketHandler;
+import com.buildgraph.prototype.ticket.SupportChatEventPublisher;
 import com.buildgraph.prototype.ticket.TicketQueryService;
 import com.buildgraph.prototype.user.CurrentUserService;
 import java.util.List;
@@ -66,10 +65,7 @@ class AdminControllerTest {
     private TicketQueryService ticketQueryService;
 
     @MockitoBean
-    private SupportChatWebSocketHandler supportChatWebSocketHandler;
-
-    @MockitoBean
-    private AdminSupportChatQueueWebSocketHandler adminSupportChatQueueWebSocketHandler;
+    private SupportChatEventPublisher supportChatEventPublisher;
 
     @MockitoBean
     private PriceQueryService priceQueryService;
@@ -413,8 +409,7 @@ class AdminControllerTest {
                 .andExpect(jsonPath("$.supportChatRoomId").value("00000000-0000-4000-8000-000000009001"));
 
         verify(ticketQueryService).update("ticket-public-id", Map.of("status", "CLOSED"), ADMIN);
-        verify(supportChatWebSocketHandler).broadcastRoomUpdate("00000000-0000-4000-8000-000000009001");
-        verify(adminSupportChatQueueWebSocketHandler).broadcastQueuePatch("00000000-0000-4000-8000-000000009001");
+        verify(supportChatEventPublisher).publishRoomChanged("00000000-0000-4000-8000-000000009001");
     }
 
     @Test
@@ -552,7 +547,6 @@ class AdminControllerTest {
 
         verify(currentUserService).requireAdmin(ADMIN_TOKEN);
         verify(ticketQueryService).delete("ticket-public-id", ADMIN);
-        verify(supportChatWebSocketHandler).broadcastRoomUpdate("00000000-0000-4000-8000-000000009001");
-        verify(adminSupportChatQueueWebSocketHandler).broadcastQueuePatch("00000000-0000-4000-8000-000000009001");
+        verify(supportChatEventPublisher).publishRoomChanged("00000000-0000-4000-8000-000000009001");
     }
 }

@@ -2,6 +2,11 @@ package com.buildgraph.prototype.ticket;
 
 import com.buildgraph.prototype.common.DbValueMapper;
 import com.buildgraph.prototype.common.MockData;
+import com.buildgraph.prototype.ticket.SupportChatMessagingContract.MessageEvent;
+import com.buildgraph.prototype.ticket.SupportChatMessagingContract.MessageRequest;
+import com.buildgraph.prototype.ticket.SupportChatMessagingContract.RoomSummary;
+import com.buildgraph.prototype.ticket.SupportChatMessagingContract.SavedMessage;
+import com.buildgraph.prototype.ticket.SupportChatMessagingContract.UserSummary;
 import com.buildgraph.prototype.user.CurrentUserService;
 import java.util.List;
 import java.util.Map;
@@ -144,6 +149,34 @@ public class SupportChatService {
                 .map(row -> contactMap(roomRow(row)));
     }
 
+    public Optional<RoomSummary> roomSummary(String roomId) {
+        requireUuid(roomId);
+        return jdbcTemplate.queryForList(roomSelect() + """
+                        WHERE r.public_id = ?::uuid
+                          AND r.deleted_at IS NULL
+                          AND t.deleted_at IS NULL
+                        """, roomId)
+                .stream()
+                .findFirst()
+                .map(this::roomRow)
+                .map(this::roomSummary);
+    }
+
+    public Optional<RoomSummary> adminQueueRoomSummary(String roomId) {
+        requireUuid(roomId);
+        return jdbcTemplate.queryForList(roomSelect() + """
+                        WHERE r.public_id = ?::uuid
+                          AND r.deleted_at IS NULL
+                          AND t.deleted_at IS NULL
+                          AND r.status = 'ACTIVE'
+                          AND t.status NOT IN ('CLOSED', 'CANCELLED')
+                        """, roomId)
+                .stream()
+                .findFirst()
+                .map(this::roomRow)
+                .map(this::roomSummary);
+    }
+
     public Map<String, Object> adminDetail(String roomId, CurrentUserService.CurrentUser admin) {
         return adminDetail(roomId, admin, true);
     }
@@ -168,29 +201,85 @@ public class SupportChatService {
     }
 
     @Transactional
-    public Map<String, Object> postUserMessage(String roomId, Map<String, Object> request, CurrentUserService.CurrentUser user) {
-        String content = requireMessage(request);
-        RoomRow room = roomForUser(roomId, user);
+    public SavedMessage saveMessage(MessageRequest request, CurrentUserService.CurrentUser sender) {
+        if (request == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "메시지 요청이 필요합니다.");
+        }
+        String roomId = stringOrNull(request.roomId());
+        if (roomId == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "상담방 ID가 필요합니다.");
+        }
+        requireUuid(roomId);
+        String clientMessageId = requireClientMessageId(request.clientMessageId());
+        String content = requireMessage(Map.of("content", request.content() == null ? "" : request.content()));
+        String senderRole = sender.role();
+        RoomRow room;
+        if ("USER".equals(senderRole)) {
+            room = roomForUser(roomId, sender);
+        } else if ("ADMIN".equals(senderRole)) {
+            room = roomForAdmin(roomId);
+        } else {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "상담 메시지를 보낼 권한이 없습니다.");
+        }
         requireMessageAllowed(room);
-        insertMessage(room.internalId(), "USER", content, user.internalId());
-        updateAfterMessage(room.internalId(), content, "USER");
-        return detail(roomId, user, false);
-    }
 
-    @Transactional
-    public Map<String, Object> postAdminMessage(String roomId, Map<String, Object> request, CurrentUserService.CurrentUser admin) {
-        String content = requireMessage(request);
-        RoomRow room = roomForAdmin(roomId);
-        requireMessageAllowed(room);
-        insertMessage(room.internalId(), "ADMIN", content, admin.internalId());
-        updateAfterMessage(room.internalId(), content, "ADMIN");
-        jdbcTemplate.update("""
-                UPDATE as_tickets
-                SET assigned_admin_id = COALESCE(assigned_admin_id, ?),
-                    updated_at = now()
-                WHERE id = ?
-                """, admin.internalId(), room.ticketInternalId());
-        return adminDetail(roomId, admin);
+        List<Map<String, Object>> insertedRows = jdbcTemplate.queryForList("""
+                INSERT INTO support_chat_messages (
+                  room_id,
+                  role,
+                  content,
+                  sender_user_id,
+                  client_message_id
+                )
+                VALUES (?, ?, ?, ?, ?::uuid)
+                ON CONFLICT (sender_user_id, client_message_id)
+                  WHERE client_message_id IS NOT NULL
+                  DO NOTHING
+                RETURNING public_id::text AS message_id,
+                          client_message_id::text AS client_message_id,
+                          content,
+                          created_at
+                """, room.internalId(), senderRole, content, sender.internalId(), clientMessageId);
+
+        boolean inserted = !insertedRows.isEmpty();
+        Map<String, Object> messageRow = inserted
+                ? insertedRows.get(0)
+                : existingMessage(sender.internalId(), clientMessageId);
+        if (!inserted) {
+            String existingRoomId = DbValueMapper.string(messageRow, "room_id");
+            if (!roomId.equals(existingRoomId)) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "이미 다른 상담방에서 사용한 메시지 ID입니다.");
+            }
+        }
+
+        if (inserted) {
+            updateAfterMessage(room.internalId(), content, senderRole);
+            if ("ADMIN".equals(senderRole)) {
+                jdbcTemplate.update("""
+                        UPDATE as_tickets
+                        SET assigned_admin_id = COALESCE(assigned_admin_id, ?),
+                            updated_at = now()
+                        WHERE id = ?
+                        """, sender.internalId(), room.ticketInternalId());
+            }
+        }
+
+        RoomRow updatedRoom = "USER".equals(senderRole)
+                ? roomForUser(roomId, sender)
+                : roomForAdmin(roomId);
+        MessageEvent event = new MessageEvent(
+                MessageEvent.TYPE,
+                DbValueMapper.string(messageRow, "message_id"),
+                DbValueMapper.string(messageRow, "client_message_id"),
+                roomId,
+                sender.id(),
+                senderRole,
+                sender.name(),
+                DbValueMapper.string(messageRow, "content"),
+                DbValueMapper.timestamp(messageRow, "created_at"),
+                roomSummary(updatedRoom)
+        );
+        return new SavedMessage(event, inserted);
     }
 
     @Transactional
@@ -406,6 +495,26 @@ public class SupportChatService {
                 """, roomInternalId, role, content, senderUserId);
     }
 
+    private Map<String, Object> existingMessage(Long senderInternalId, String clientMessageId) {
+        return jdbcTemplate.queryForList("""
+                        SELECT m.public_id::text AS message_id,
+                               m.client_message_id::text AS client_message_id,
+                               r.public_id::text AS room_id,
+                               m.content,
+                               m.created_at
+                        FROM support_chat_messages m
+                        JOIN support_chat_rooms r ON r.id = m.room_id
+                        WHERE m.sender_user_id = ?
+                          AND m.client_message_id = ?::uuid
+                        """, senderInternalId, clientMessageId)
+                .stream()
+                .findFirst()
+                .orElseThrow(() -> new ResponseStatusException(
+                        HttpStatus.CONFLICT,
+                        "중복 메시지를 확인할 수 없습니다. 다시 시도해 주세요."
+                ));
+    }
+
     private void updateAfterMessage(Long roomInternalId, String content, String role) {
         int userUnreadDelta = "ADMIN".equals(role) ? 1 : 0;
         int adminUnreadDelta = "USER".equals(role) ? 1 : 0;
@@ -423,6 +532,7 @@ public class SupportChatService {
     private List<Map<String, Object>> messages(Long roomInternalId) {
         return jdbcTemplate.queryForList("""
                         SELECT recent.id_text AS id,
+                               recent.client_message_id,
                                recent.role,
                                recent.content,
                                recent.created_at,
@@ -431,6 +541,7 @@ public class SupportChatService {
                         FROM (
                           SELECT m.id AS sort_id,
                                  m.public_id::text AS id_text,
+                                 m.client_message_id::text AS client_message_id,
                                  m.role,
                                  m.content,
                                  m.created_at,
@@ -447,6 +558,7 @@ public class SupportChatService {
                 .stream()
                 .map(row -> MockData.map(
                         "id", DbValueMapper.string(row, "id"),
+                        "clientMessageId", DbValueMapper.string(row, "client_message_id"),
                         "role", DbValueMapper.string(row, "role"),
                         "content", DbValueMapper.string(row, "content"),
                         "senderId", DbValueMapper.string(row, "sender_id"),
@@ -494,6 +606,24 @@ public class SupportChatService {
                 ),
                 "visitReservation", visitReservationMap(room.ticketInternalId()),
                 "canSendMessage", "ACTIVE".equals(room.status()) && !TERMINAL_TICKET_STATUSES.contains(room.ticketStatus())
+        );
+    }
+
+    private RoomSummary roomSummary(RoomRow room) {
+        return new RoomSummary(
+                room.publicId(),
+                room.ticketPublicId(),
+                room.status(),
+                room.ticketStatus(),
+                room.title(),
+                room.ticketSymptom(),
+                room.lastMessagePreview(),
+                room.lastMessageAt(),
+                room.userUnreadCount(),
+                room.adminUnreadCount(),
+                room.assignedAdminId(),
+                "ACTIVE".equals(room.status()) && !TERMINAL_TICKET_STATUSES.contains(room.ticketStatus()),
+                new UserSummary(room.userPublicId(), room.userEmail(), room.userName())
         );
     }
 
@@ -589,6 +719,19 @@ public class SupportChatService {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "메시지는 2000자 이하로 입력해 주세요.");
         }
         return content;
+    }
+
+    private static String requireClientMessageId(String value) {
+        String clientMessageId = stringOrNull(value);
+        if (clientMessageId == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "clientMessageId가 필요합니다.");
+        }
+        try {
+            UUID.fromString(clientMessageId);
+            return clientMessageId;
+        } catch (IllegalArgumentException error) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "clientMessageId는 UUID 형식이어야 합니다.");
+        }
     }
 
     private static void requireMessageAllowed(RoomRow room) {

@@ -6,8 +6,7 @@ import com.buildgraph.prototype.common.PipelineJobRunRecorder;
 import com.buildgraph.prototype.price.PriceQueryService;
 import com.buildgraph.prototype.rag.RagEmbeddingService;
 import com.buildgraph.prototype.rag.RagQueryService;
-import com.buildgraph.prototype.ticket.AdminSupportChatQueueWebSocketHandler;
-import com.buildgraph.prototype.ticket.SupportChatWebSocketHandler;
+import com.buildgraph.prototype.ticket.SupportChatEventPublisher;
 import com.buildgraph.prototype.ticket.TicketQueryService;
 import com.buildgraph.prototype.user.CurrentUserService;
 import java.util.Map;
@@ -32,8 +31,7 @@ public class AdminController {
     private final RagQueryService ragQueryService;
     private final RagEmbeddingService ragEmbeddingService;
     private final TicketQueryService ticketQueryService;
-    private final SupportChatWebSocketHandler supportChatWebSocketHandler;
-    private final AdminSupportChatQueueWebSocketHandler adminSupportChatQueueWebSocketHandler;
+    private final SupportChatEventPublisher supportChatEventPublisher;
     private final PriceQueryService priceQueryService;
     private final BuildGraphLayoutService buildGraphLayoutService;
     private final CurrentUserService currentUserService;
@@ -45,8 +43,7 @@ public class AdminController {
             RagQueryService ragQueryService,
             RagEmbeddingService ragEmbeddingService,
             TicketQueryService ticketQueryService,
-            SupportChatWebSocketHandler supportChatWebSocketHandler,
-            AdminSupportChatQueueWebSocketHandler adminSupportChatQueueWebSocketHandler,
+            SupportChatEventPublisher supportChatEventPublisher,
             PriceQueryService priceQueryService,
             BuildGraphLayoutService buildGraphLayoutService,
             CurrentUserService currentUserService,
@@ -57,8 +54,7 @@ public class AdminController {
         this.ragQueryService = ragQueryService;
         this.ragEmbeddingService = ragEmbeddingService;
         this.ticketQueryService = ticketQueryService;
-        this.supportChatWebSocketHandler = supportChatWebSocketHandler;
-        this.adminSupportChatQueueWebSocketHandler = adminSupportChatQueueWebSocketHandler;
+        this.supportChatEventPublisher = supportChatEventPublisher;
         this.priceQueryService = priceQueryService;
         this.buildGraphLayoutService = buildGraphLayoutService;
         this.currentUserService = currentUserService;
@@ -175,8 +171,7 @@ public class AdminController {
         Map<String, Object> ticket = ticketQueryService.update(id, request, admin);
         String supportChatRoomId = stringOrNull(ticket.get("supportChatRoomId"));
         if (supportChatRoomId != null) {
-            supportChatWebSocketHandler.broadcastRoomUpdate(supportChatRoomId);
-            adminSupportChatQueueWebSocketHandler.broadcastQueuePatch(supportChatRoomId);
+            supportChatEventPublisher.publishRoomChanged(supportChatRoomId);
         }
         return ticket;
     }
@@ -257,8 +252,7 @@ public class AdminController {
         Map<String, Object> result = ticketQueryService.delete(id, admin);
         String supportChatRoomId = stringOrNull(result.get("supportChatRoomId"));
         if (supportChatRoomId != null) {
-            supportChatWebSocketHandler.broadcastRoomUpdate(supportChatRoomId);
-            adminSupportChatQueueWebSocketHandler.broadcastQueuePatch(supportChatRoomId);
+            supportChatEventPublisher.publishRoomChanged(supportChatRoomId);
         }
         return result;
     }
@@ -287,8 +281,7 @@ public class AdminController {
     private Map<String, Object> broadcastTicketUpdate(Map<String, Object> ticket) {
         String supportChatRoomId = stringOrNull(ticket.get("supportChatRoomId"));
         if (supportChatRoomId != null) {
-            supportChatWebSocketHandler.broadcastRoomUpdate(supportChatRoomId);
-            adminSupportChatQueueWebSocketHandler.broadcastQueuePatch(supportChatRoomId);
+            supportChatEventPublisher.publishRoomChanged(supportChatRoomId);
         }
         return ticket;
     }

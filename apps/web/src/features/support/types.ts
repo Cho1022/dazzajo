@@ -181,11 +181,14 @@ export type VisitSupportReservation = {
 
 export type SupportChatMessage = {
   id: string;
+  clientMessageId?: string | null;
   role: 'USER' | 'ADMIN' | 'SYSTEM';
   content: string;
   senderId?: string | null;
   senderName?: string | null;
   createdAt?: string;
+  pending?: boolean;
+  failed?: boolean;
 };
 
 export type SupportChatSessionDto = {
